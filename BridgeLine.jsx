@@ -10,7 +10,7 @@
 */
 (function (thisObj) {
 
-var RB = { VERSION: "1.0.2", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
+var RB = { VERSION: "1.0.3", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
 RB.root = Folder.myDocuments.fsName + "/bridgeline";
 RB.cmdPath = RB.root + "/command.json";
 RB.resPath = RB.root + "/result.json";
@@ -192,8 +192,29 @@ function writeAtomic(path, text) {
     var tmp = path + ".tmp";
     writeText(tmp, text);
     var target = new File(path);
-    if (target.exists) target.remove();
-    new File(tmp).rename(target.name);
+    // Windows cannot delete a file another process is reading at that moment: retry briefly
+    for (var k = 0; k < 40 && target.exists; k++) { if (target.remove()) break; $.sleep(25); }
+    if (!new File(tmp).rename(target.name)) fail("Cannot replace file: " + path);
+}
+
+// ---------------------------------------------------------------- paths (macOS + Windows)
+RB.isWin = File.fs === "Windows";
+// Comparable form of a path: forward slashes, no trailing slash, lower case on Windows.
+function pathKey(p) {
+    var s = new File(String(p)).fsName.replace(/\\/g, "/");
+    if (s.length > 1 && s.charAt(s.length - 1) === "/" && !/^[A-Za-z]:\/$/.test(s)) s = s.substr(0, s.length - 1);
+    return RB.isWin ? s.toLowerCase() : s;
+}
+function samePath(a, b) { return pathKey(a) === pathKey(b); }
+function isUnder(p, root) { var k = pathKey(p), r = pathKey(root); return k === r || k.indexOf(r.charAt(r.length - 1) === "/" ? r : r + "/") === 0; }
+function isAbsPath(s) { return /^([\/~]|[A-Za-z]:[\\\/]|\\\\)/.test(String(s)); }
+// Folders below the volume / drive root: /Users/x/Documents = 3, C:/Projects = 1, //server/share/x = 1
+function pathDepth(p) {
+    var k = pathKey(p), segs = k.split("/"), n = 0, i;
+    for (i = 0; i < segs.length; i++) if (segs[i] !== "") n++;
+    if (k.substr(0, 2) === "//") n -= 2;
+    else if (/^[a-z]:/i.test(k)) n -= 1;
+    return n;
 }
 function allowedRoots() {
     var r = [new Folder(RB.root).fsName];
@@ -201,19 +222,22 @@ function allowedRoots() {
         if (app.project.file) {
             var pf = app.project.file.parent;
             r.push(pf.fsName);
-            var pp = pf.parent, home = Folder("~").fsName;
-            if (pp && pp.fsName !== home && pp.fsName.split("/").length > 3) r.push(pp.fsName);
+            // the parent of the project folder too, unless it is the home folder, one of its ancestors or a volume root
+            var pp = pf.parent, homes = [Folder("~").fsName, Folder.myDocuments.parent.fsName], ok = !!pp, i;
+            if (ok && pathDepth(pp.fsName) < (RB.isWin ? 1 : 3)) ok = false;
+            for (i = 0; ok && i < homes.length; i++) if (isUnder(homes[i], pp.fsName)) ok = false;
+            if (ok) r.push(pp.fsName);
         }
     } catch (e) {}
     return r;
 }
 function safeOut(p) {
     var s = String(p);
-    if (/(^|\/)\.\.(\/|$)/.test(s)) fail("'..' is not allowed in output paths: " + s);
-    if (s.charAt(0) !== "/" && s.charAt(0) !== "~") s = RB.root + "/" + s;
+    if (/(^|[\/\\])\.\.([\/\\]|$)/.test(s)) fail("'..' is not allowed in output paths: " + s);
+    if (!isAbsPath(s)) s = RB.root + "/" + s;
     var full = new File(s).fsName, roots = allowedRoots();
     for (var i = 0; i < roots.length; i++) {
-        if (full === roots[i] || full.indexOf(roots[i] + "/") === 0) {
+        if (isUnder(full, roots[i])) {
             ensureFolder(new File(full).parent.fsName);
             return full;
         }
@@ -3630,10 +3654,8 @@ RB.claimWait = 15;
 RB.skippedId = null;
 
 function projectMatches(p) {
-    var cur = app.project.file ? app.project.file.fsName : "(unsaved project)";
-    var want = p;
-    try { want = new File(p).fsName; } catch (e) {}
-    return cur === want;
+    if (!app.project.file) return false;
+    try { return samePath(app.project.file.fsName, p); } catch (e) { return false; }
 }
 
 function cmdAgeSec(f) {
@@ -3664,7 +3686,10 @@ RB.tick = function () {
         return;
     }
     if (!f.exists) { RB.busy = false; return; }
-    try { f.remove(); } catch (er) { RB.busy = false; return; }
+    // if the file cannot be removed (e.g. Windows file lock) try again on the next tick instead of running it twice
+    var removed = false;
+    try { removed = f.remove(); } catch (er) {}
+    if (!removed) { RB.busy = false; return; }
     try {
         cmd = jsonParse(raw);
         res.id = cmd.id; res.command = cmd.command;

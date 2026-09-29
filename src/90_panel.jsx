@@ -10,10 +10,8 @@ RB.claimWait = 15;
 RB.skippedId = null;
 
 function projectMatches(p) {
-    var cur = app.project.file ? app.project.file.fsName : "(unsaved project)";
-    var want = p;
-    try { want = new File(p).fsName; } catch (e) {}
-    return cur === want;
+    if (!app.project.file) return false;
+    try { return samePath(app.project.file.fsName, p); } catch (e) { return false; }
 }
 
 function cmdAgeSec(f) {
@@ -44,7 +42,10 @@ RB.tick = function () {
         return;
     }
     if (!f.exists) { RB.busy = false; return; }
-    try { f.remove(); } catch (er) { RB.busy = false; return; }
+    // if the file cannot be removed (e.g. Windows file lock) try again on the next tick instead of running it twice
+    var removed = false;
+    try { removed = f.remove(); } catch (er) {}
+    if (!removed) { RB.busy = false; return; }
     try {
         cmd = jsonParse(raw);
         res.id = cmd.id; res.command = cmd.command;

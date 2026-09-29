@@ -3,6 +3,12 @@
 Read `README.md` (overview, safety, addressing, limitations), `docs/PANEL.md` (what the user sees) and `docs/COMMANDS.md` (all commands) before working.
 Commands are sent with `python3 aeb.py <command> '<json args>' --project "<path to the .aep>"`.
 
+On Windows:
+- Python is usually `python` or `py`, not `python3`.
+- Windows PowerShell 5.1 strips the double quotes from JSON passed to native programs. In PowerShell, write the args to a
+  file and use `--args-file args.json`; in Git Bash or cmd the normal quoting works.
+- Pass Windows paths as they are (`--project "C:\Work\Proj.aep"`); the panel compares paths without case.
+
 ## Working with the user
 - Answer in the user's language.
 - **Real projects:**
@@ -14,8 +20,8 @@ Commands are sent with `python3 aeb.py <command> '<json args>' --project "<path 
 - Never run `startRender`, `queueInAME`, `saveProject`, `cleanupProject` or `menuCommand incrementAndSave` without asking first.
 - When the user says "stop", stop and run nothing.
 - `tests/run_tests.py` creates and deletes comps. Run it only on an empty test project, never on a real one.
-- Installing the panel needs the user's password (sudo). Never enter passwords: after changes to `src/`, run `./build.sh`,
-  then ask the user to run `./install.sh` and reopen the panel.
+- Installing the panel needs administrator rights (sudo on macOS, UAC on Windows). Never enter passwords: after changes
+  to `src/`, run `./build.sh`, then ask the user to run `./install.sh` (macOS) or `install.ps1` (Windows) and reopen the panel.
 
 ## Rules that caught bugs before
 - **Always pass `--project "<path to the .aep>"`** (or `AEB_PROJECT`) so a command cannot hit the wrong project.

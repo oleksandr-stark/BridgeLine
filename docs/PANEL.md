@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────────────────────────┐
-│ BridgeLine v1.0.2                   │  version
+│ BridgeLine v1.0.3                   │  version
 │ Listening  |  read-only             │  status line
 │ [x] Listen   [ ] Allow changes      │
 │ [Send selection]  [Undo last]       │
@@ -78,7 +78,7 @@ Handy when the panel is docked away from the menu.
 
 ## Open folder
 
-Opens the exchange folder `~/Documents/bridgeline/` in Finder. There you find:
+Opens the exchange folder `~/Documents/bridgeline/` in Finder (on Windows: `Documents\bridgeline` in Explorer). There you find:
 - rendered frames (`renders/`), previews (`previews/`), snapshots (`snapshots/`), dumps (`dumps/`);
 - `log.txt`, the full log;
 - `notes.json` and `selection.json` from the buttons above.

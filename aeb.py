@@ -6,12 +6,30 @@
   --project /path/file.aep (or env AEB_PROJECT): panel refuses if another project is open
   aeb.py compare --comp NAME --time T --ref VIDEO --ref-time T2 [--out file.png]
 
-Writes ~/Documents/bridgeline/command.json atomically, waits for result.json with the same id,
+Writes <Documents>/bridgeline/command.json atomically, waits for result.json with the same id,
 prints it. Exit code 0 = ok, 1 = command error, 2 = timeout / panel not listening.
+<Documents> is the same folder the panel uses (on Windows also when Documents is moved to OneDrive).
+Set AEB_ROOT to override the exchange folder.
 """
 import json, os, subprocess, sys, time, uuid, argparse
 
-ROOT = os.path.expanduser("~/Documents/bridgeline")
+
+
+def documents_dir():
+    """The user's Documents folder, as After Effects (Folder.myDocuments) sees it."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(1024)
+            # CSIDL_PERSONAL = 5: follows Documents redirection (OneDrive, another drive)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf) == 0 and buf.value:
+                return buf.value
+        except Exception:
+            pass
+    return os.path.join(os.path.expanduser("~"), "Documents")
+
+
+ROOT = os.environ.get("AEB_ROOT") or os.path.join(documents_dir(), "bridgeline")
 CMD = os.path.join(ROOT, "command.json")
 RES = os.path.join(ROOT, "result.json")
 
@@ -23,7 +41,10 @@ def send(command, args, timeout=120, project=None):
         age = time.time() - os.path.getmtime(CMD)
         if age < 5:
             return {"ok": False, "error": "previous command is still waiting to be picked up"}, 2
-        os.remove(CMD)
+        try:
+            os.remove(CMD)
+        except OSError:
+            pass
     tmp = CMD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         msg = {"id": cid, "command": command, "args": args}
@@ -43,20 +64,21 @@ def send(command, args, timeout=120, project=None):
                 os.remove(CMD)
             except OSError:
                 pass
-            if not os.path.exists(RES) or _rid() != cid:
-                return {"ok": False, "error": "command not picked up in %s s: no listening AE has '%s' open, or the panel is not listening (Window > BridgeLine.jsx, tick Listen)" % (pickup, project or "the project")}, 2
-        if _rid() == cid:
-            with open(RES, encoding="utf-8") as f:
-                res = json.load(f)
+            res = _result()
+            if not res or res.get("id") != cid:
+                return {"ok": False, "error": "command not picked up in %s s: no listening AE has '%s' open, or the panel is not listening (Window > BridgeLine.jsx, tick Listen). The client uses %s; if the panel log shows another bridge folder, set AEB_ROOT to it." % (pickup, project or "the project", ROOT)}, 2
+        res = _result()
+        if res and res.get("id") == cid:
             return res, (0 if res.get("ok") else 1)
         time.sleep(0.1)
     return {"ok": False, "error": "timeout after %ss (AE busy?)" % timeout}, 2
 
 
-def _rid():
+def _result():
+    # None while the file is missing or being replaced by the panel
     try:
         with open(RES, encoding="utf-8") as f:
-            return json.load(f).get("id")
+            return json.load(f)
     except Exception:
         return None
 

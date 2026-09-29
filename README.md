@@ -7,7 +7,8 @@ A ScriptUI panel for Adobe After Effects that lets an AI coding agent work with 
 
 The panel exposes 134 fixed commands and has no `eval`. It cannot run arbitrary code, launch shell commands or open network connections. It is not tied to any template or project.
 
-Version 1.0.2. Tested on After Effects 2026 (26.5) and 27.0 Beta, macOS: 47/47 test scenarios pass. Windows is not supported yet (file paths are handled the macOS way).
+Version 1.0.3. Tested on After Effects 2026 (26.5) and 27.0 Beta on macOS: 47/47 test scenarios pass.
+**Windows** support is new in 1.0.3 and not yet tested on a real Windows machine: please report what breaks.
 
 ---
 
@@ -31,6 +32,7 @@ BridgeLine.jsx        built panel (the file you install in AE)
 aeb.py                  client: the agent sends commands through it
 build.sh                builds src/*.jsx -> BridgeLine.jsx, runs checks, regenerates docs/COMMANDS.md
 install.sh              installs the panel into AE on macOS (uses sudo)
+install.ps1             installs the panel into AE on Windows (asks for administrator rights)
 src/                    panel source code
   00_core.jsx           JSON, lookup of comps/layers/properties, serialization, keys, 2D math, dispatcher
   10_read.jsx           read commands (dump, render, search, audit, snapshot/diff...)
@@ -58,7 +60,7 @@ CHANGELOG.md            version history
 
 ## How it works
 
-- The agent and the panel exchange files in `~/Documents/bridgeline/`:
+- The agent and the panel exchange files in `~/Documents/bridgeline/` (on Windows: `Documents\bridgeline`, also when Documents is in OneDrive; `AEB_ROOT` overrides it):
   - `command.json`: a command `{id, command, args, project}`. The client writes it atomically, the panel picks it up and deletes it.
   - `result.json`: the result `{id, ok, result | error, warnings, ms}`.
   - `log.txt`: the panel log. Output folders: `renders/`, `snapshots/`, `previews/`, `dumps/`, `compare/`.
@@ -119,8 +121,8 @@ Never run the tests on a real project: they create and delete comps.
 ## Development
 
 1. Edit `src/*.jsx` (never the built `BridgeLine.jsx`).
-2. `./build.sh` checks syntax (needs Node.js) and ExtendScript pitfalls: ES3 reserved words such as `short`, `int`, `.in`, and non-ASCII characters. It also regenerates `docs/COMMANDS.md`.
-3. Install again (`./install.sh`), then close and reopen the panel.
+2. `./build.sh` checks syntax (needs Node.js; on Windows run it in Git Bash or WSL) and ExtendScript pitfalls: ES3 reserved words such as `short`, `int`, `.in`, and non-ASCII characters. It also regenerates `docs/COMMANDS.md`.
+3. Install again (`./install.sh` or `install.ps1`), then close and reopen the panel.
 4. Run the tests.
 5. Add a line to `CHANGELOG.md`.
 

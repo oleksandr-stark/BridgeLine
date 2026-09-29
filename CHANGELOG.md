@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3
+- **Windows support** (not yet tested on a real Windows machine):
+  - file paths are compared in a Windows-aware way (backslashes, drive letters, UNC, case-insensitive), so
+    `renderFrames`, `snapshot`/`diff`, `out`, `backupProject` and the project guard work with `C:\...` paths;
+  - `aeb.py` finds the same Documents folder as After Effects, also when Documents is moved to OneDrive; `AEB_ROOT` overrides it;
+  - `install.ps1` installs the panel (asks for administrator rights);
+  - the tests find the stock preset and temp folder on either system.
+- The panel no longer runs a command twice if it cannot delete `command.json` (it retries on the next tick),
+  and retries replacing `result.json` while another program is reading it.
+
 ## 1.0.2
 - First public release, under the name BridgeLine. Works with any AI agent that can run terminal commands (instructions in `AGENTS.md`). Tests: 47 passed on AE 27.0 Beta.
 - **Commands are addressed to the right After Effects instance.** With two AE versions running (release + Beta), both

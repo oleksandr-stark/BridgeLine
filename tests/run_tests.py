@@ -3,14 +3,27 @@
    (an empty project saved as tests/bridge_test.aep, or set AEB_TEST_PROJECT).
    python3 tests/run_tests.py [phase ...]    phases: setup layers props fx project read edge (default: all)
 """
-import json, os, sys, time, traceback
+import glob, json, os, sys, tempfile, time, traceback
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import aeb
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.environ.get("AEB_TEST_PROJECT", os.path.join(HERE, "bridge_test.aep"))
 ASSETS = os.path.join(HERE, "assets")
-PRESET = "/Applications/Adobe After Effects 2026/Presets/Image - Special Effects/Light Leaks - random.ffx"
+TMP = tempfile.gettempdir()  # outside the folders the panel may write to
+
+
+def find_preset(name="Image - Special Effects/Light Leaks - random.ffx"):
+    """A stock AE preset for the applyPreset test (macOS or Windows install), or AEB_TEST_PRESET."""
+    if os.environ.get("AEB_TEST_PRESET"):
+        return os.environ["AEB_TEST_PRESET"]
+    pats = ["/Applications/Adobe After Effects*/Presets/" + name,
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Adobe", "Adobe After Effects*", "Support Files", "Presets", *name.split("/"))]
+    found = sorted(f for p in pats for f in glob.glob(p))
+    return found[-1] if found else name
+
+
+PRESET = find_preset()
 RESULTS = {"pass": 0, "fail": 0, "failures": []}
 CUR = ["?"]
 
@@ -94,7 +107,7 @@ def _():
     p = r("ping")
     check(p["project"] == PROJECT, "wrong project open: %s" % p["project"])
     check(p["allowWrites"], "Allow changes is off")
-    res, code = aeb.send("ping", {}, 20, "/tmp/other_project.aep")
+    res, code = aeb.send("ping", {}, 20, os.path.join(TMP, "other_project.aep"))
     check(not res.get("ok") and "Project guard" in res.get("error", ""), "project guard did not block: %s" % res)
 
 
@@ -130,7 +143,7 @@ def _():
     have = {i["name"] for i in items}
     for fn in ["logo.png", "clip.mp4", "voice.wav"]:
         if fn not in have:
-            r("importFile", {"file": ASSETS + "/" + fn, "folder": "TEST/Footage"})
+            r("importFile", {"file": os.path.join(ASSETS, fn), "folder": "TEST/Footage"})
     if not any(n.startswith("seq_") for n in have):
         r("importFile", {"file": ASSETS + "/seq_0000.png", "sequence": True, "folder": "TEST/Footage", "name": "SEQ"})
     r("importFile", {"file": ASSETS + "/nope.png"}, ok=False)
@@ -447,7 +460,7 @@ def _():
     check(all(x["added"] for x in eg), eg)
     m = r("exportMogrt", {"comp": "T_Main", "file": os.path.join(HERE, "out") + "/test.mogrt", "overwrite": True}, timeout=180)
     check(m["ok"], m)
-    r("exportMogrt", {"comp": "T_Main", "file": "/tmp/evil.mogrt"}, ok=False)
+    r("exportMogrt", {"comp": "T_Main", "file": os.path.join(TMP, "evil.mogrt")}, ok=False)
 
 
 # ======================================================================= FX / TEXT / SHAPES
@@ -492,7 +505,7 @@ def _():
 def _():
     r("addSolid", {"comp": "T_Main", "name": "PRESET_TARGET", "color": "#000000"})
     r("applyPreset", {"comp": "T_Main", "layer": "PRESET_TARGET", "file": PRESET})
-    r("applyPreset", {"comp": "T_Main", "layer": "PRESET_TARGET", "file": "/tmp/x.jsx"}, ok=False)
+    r("applyPreset", {"comp": "T_Main", "layer": "PRESET_TARGET", "file": os.path.join(TMP, "x.jsx")}, ok=False)
 
 
 @test("text: setText, style, char style, replace, font, box, keyed text")

@@ -5,3 +5,4 @@ __pycache__/
 tests/*.aep
 tests/out/
 tests/_backup/
+tests/Auto-Save/
