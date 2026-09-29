@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+tests/*.aep
+tests/out/
+tests/_backup/

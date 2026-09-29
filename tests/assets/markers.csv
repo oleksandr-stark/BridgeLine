@@ -1,0 +1,4 @@
+time;duration;comment
+0.5;1;One
+00:00:02:15;0.5;"Two; with sep"
+1:03.5;0;Three
