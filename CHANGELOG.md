@@ -1,7 +1,7 @@
 # Changelog
 
 ## 1.0.2
-- First public release, under the name BridgeLine. Works with any AI agent that can run terminal commands (instructions in `AGENTS.md`).
+- First public release, under the name BridgeLine. Works with any AI agent that can run terminal commands (instructions in `AGENTS.md`). Tests: 47 passed on AE 27.0 Beta.
 - **Commands are addressed to the right After Effects instance.** With two AE versions running (release + Beta), both
   panels watch the same exchange folder. Before, whichever polled first took the command and answered "wrong project".
   Now a panel that does not have the command's project open leaves the command for 15 s so the right instance can take it.

@@ -7,7 +7,7 @@ A ScriptUI panel for Adobe After Effects that lets an AI coding agent work with 
 
 The panel exposes 134 fixed commands and has no `eval`. It cannot run arbitrary code, launch shell commands or open network connections. It is not tied to any template or project.
 
-Version 1.0.2. Tested on After Effects 2026 (26.5), macOS. Windows is not supported yet (file paths are handled the macOS way).
+Version 1.0.2. Tested on After Effects 2026 (26.5) and 27.0 Beta, macOS: 47/47 test scenarios pass. Windows is not supported yet (file paths are handled the macOS way).
 
 ---
 

@@ -45,6 +45,15 @@ sudo install -m 644 BridgeLine.jsx "/Applications/Adobe After Effects 2026/Scrip
 
 Change `2026` to your version. Use `install -m 644` rather than `cp`: when the file is copied from an external drive with `cp`, it can get `rwx------` permissions, and After Effects then says it cannot open the file.
 
+Only the panel, without cloning the repository:
+
+```bash
+curl -L -o /tmp/BridgeLine.jsx https://raw.githubusercontent.com/oleksandr-stark/BridgeLine/main/BridgeLine.jsx
+sudo install -m 644 /tmp/BridgeLine.jsx "/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/"
+```
+
+Your AI agent still needs the repository (`aeb.py` and `AGENTS.md`), so step 1 is needed anyway to work with it.
+
 ### Option C: by hand, in Finder
 
 1. In Finder open `/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/`.
