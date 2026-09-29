@@ -58,7 +58,7 @@ Use `install -m 644` rather than `cp`: when the file is copied from an external 
 Only the panel, without cloning the repository:
 
 ```bash
-curl -L -o /tmp/BridgeLine.jsx https://raw.githubusercontent.com/oleksandr-stark/BridgeLine/main/BridgeLine.jsx
+curl -L -o /tmp/BridgeLine.jsx https://github.com/oleksandr-stark/BridgeLine/releases/latest/download/BridgeLine.jsx
 sudo install -m 644 /tmp/BridgeLine.jsx "/Applications/Adobe After Effects 2026/Scripts/ScriptUI Panels/"
 ```
 
@@ -93,7 +93,7 @@ Copy-Item "C:\path\to\BridgeLine\BridgeLine.jsx" "C:\Program Files\Adobe\Adobe A
 Only the panel, without cloning the repository (also as administrator):
 
 ```powershell
-curl.exe -L -o "$env:TEMP\BridgeLine.jsx" https://raw.githubusercontent.com/oleksandr-stark/BridgeLine/main/BridgeLine.jsx
+curl.exe -L -o "$env:TEMP\BridgeLine.jsx" https://github.com/oleksandr-stark/BridgeLine/releases/latest/download/BridgeLine.jsx
 Copy-Item "$env:TEMP\BridgeLine.jsx" "C:\Program Files\Adobe\Adobe After Effects 2026\Support Files\Scripts\ScriptUI Panels\"
 ```
 
@@ -142,6 +142,8 @@ If `ping` does not answer but the panel shows **Listening**, compare `bridgeFold
 You can point the client to a folder with the `AEB_ROOT` environment variable.
 
 ## Updating
+
+When a new version is out, your agent mentions it after a `ping` and the panel shows a notice (see [PANEL.md](PANEL.md)).
 
 ```bash
 git pull

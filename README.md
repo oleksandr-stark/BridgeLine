@@ -79,6 +79,15 @@ CHANGELOG.md            version history
   - `--max N` truncates the printed output (the full result goes to `~/Documents/bridgeline/last_result.json`), `--max 0` disables truncation.
   - `python3 aeb.py compare --comp X --time T --ref video.mp4 --ref-time T2` puts a rendered frame next to a frame of a reference video (needs ffmpeg).
 
+## Updates
+
+- After a `ping`, the client checks the [latest release](https://github.com/oleksandr-stark/BridgeLine/releases) at most once a day.
+  If there is a newer version, the agent tells you and the panel shows a notice under the status line.
+- The same notice appears when the files in this folder are newer than the installed panel (updated but not reinstalled).
+- To update: `git pull` in this folder (the agent can do it), then run `./install.sh` or `install.ps1` yourself and reopen the panel.
+- The panel never goes online itself. Only the client makes one small HTTPS request to the GitHub API;
+  set `BRIDGELINE_NO_UPDATE_CHECK=1` to turn it off.
+
 ## Safety
 
 - **Read-only by default.** "Allow changes" is off every time the panel starts. Without it only read commands work.

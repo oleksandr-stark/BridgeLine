@@ -10,7 +10,7 @@
 */
 (function (thisObj) {
 
-var RB = { VERSION: "1.0.3", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
+var RB = { VERSION: "1.0.4", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
 RB.root = Folder.myDocuments.fsName + "/bridgeline";
 RB.cmdPath = RB.root + "/command.json";
 RB.resPath = RB.root + "/result.json";

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.4
+- **Update notice.** After a `ping`, `aeb.py` checks the latest release on GitHub (at most once a day, 3 s timeout) and
+  compares it, and the panel file in its own folder, with the panel that answered:
+  - the ping result gets an `update` field, so the agent can tell you;
+  - the panel shows a line: "BridgeLine vX is available: ask your agent to update", or
+    "Files are at vX: reinstall the panel" when the files were updated but the panel was not reinstalled.
+  The panel itself still has no network access: it only reads `update.json` written by the client.
+  `BRIDGELINE_NO_UPDATE_CHECK=1` turns the GitHub request off.
+- Releases are published on GitHub with `BridgeLine.jsx` attached.
+
 ## 1.0.3
 - **Windows support** (not yet tested on a real Windows machine):
   - file paths are compared in a Windows-aware way (backslashes, drive letters, UNC, case-insensitive), so

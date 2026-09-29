@@ -10,6 +10,9 @@ On Windows:
 - Pass Windows paths as they are (`--project "C:\Work\Proj.aep"`); the panel compares paths without case.
 
 ## Working with the user
+- **Updates:** if a `ping` result has an `update` field, tell the user in one line and offer to update:
+  `git pull` in the bridge folder (skip if it is not a git clone: then point to the releases page), then ask the user
+  to run `./install.sh` (macOS) or `install.ps1` (Windows) and reopen the panel, and `ping` again to confirm the version.
 - Answer in the user's language.
 - **Real projects:**
   1. Read the state first (`ping`, `compInfo`, `dumpComp`, `renderFrames`, `activeState`, `getNotes`).

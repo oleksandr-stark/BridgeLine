@@ -22,7 +22,45 @@ function cmdAgeSec(f) {
     } catch (e) { return 9999; }
 }
 
+// ---------------------------------------------------------------- update notice
+// The panel has no network access. The client (aeb.py) checks for a newer version after a ping and writes
+// update.json into the exchange folder; the panel only reads it and shows a notice.
+RB.updPath = RB.root + "/update.json";
+RB.updStamp = null;
+RB.updTicks = 0;
+
+function versionNewer(a, b) {
+    var x = String(a).split("."), y = String(b).split("."), i, n = Math.max(x.length, y.length);
+    for (i = 0; i < n; i++) {
+        var p = parseInt(x[i] || "0", 10), q = parseInt(y[i] || "0", 10);
+        if (p !== q) return p > q;
+    }
+    return false;
+}
+
+RB.checkUpdateNote = function () {
+    if (!RB.ui || !RB.ui.upd) return;
+    var f = new File(RB.updPath), stamp = "none", msg = "";
+    try { if (f.exists) stamp = String(f.modified.getTime()); } catch (e0) {}
+    if (stamp === RB.updStamp) return;
+    RB.updStamp = stamp;
+    if (stamp !== "none") {
+        try {
+            var u = jsonParse(readText(RB.updPath)), v = String(u.available || "");
+            if (/^\d+(\.\d+)*$/.test(v) && versionNewer(v, RB.VERSION)) {
+                msg = u.where === "files"
+                    ? "Files are at v" + v + ": reinstall the panel (install.sh / install.ps1)"
+                    : "BridgeLine v" + v + " is available: ask your agent to update";
+            }
+        } catch (e1) {}
+    }
+    RB.ui.upd.text = msg;
+    RB.ui.upd.visible = msg !== "";
+    try { RB.ui.win.layout.layout(true); } catch (e2) {}
+};
+
 RB.tick = function () {
+    if (!RB.busy && (RB.updTicks++ % 20) === 0) { try { RB.checkUpdateNote(); } catch (eu) {} }
     if (RB.busy || !RB.ui || !RB.ui.listen.value) return;
     var f = new File(RB.cmdPath);
     if (!f.exists) return;
@@ -91,6 +129,10 @@ function buildUI(thisObj) {
     var title = w.add("statictext", undefined, "BridgeLine v" + RB.VERSION);
     var status = w.add("statictext", undefined, "", { truncate: "end" });
     status.preferredSize.width = 260;
+    var upd = w.add("statictext", undefined, "", { truncate: "end" });
+    upd.preferredSize.width = 260;
+    try { upd.graphics.foregroundColor = upd.graphics.newPen(upd.graphics.PenType.SOLID_COLOR, [1, 0.72, 0.2], 1); } catch (eg) {}
+    upd.visible = false;
 
     var g1 = w.add("group"); g1.alignChildren = ["left", "center"];
     var listen = g1.add("checkbox", undefined, "Listen");
@@ -112,7 +154,7 @@ function buildUI(thisObj) {
     list.preferredSize.height = 180;
     list.alignment = ["fill", "fill"];
 
-    RB.ui = { win: w, status: status, listen: listen, allow: allow, list: list };
+    RB.ui = { win: w, status: status, upd: upd, listen: listen, allow: allow, list: list };
 
     listen.onClick = function () { saveSetting("listen", listen.value ? "1" : "0"); RB.setStatus(); };
     allow.onClick = function () { RB.log(allow.value ? "Changes ALLOWED" : "Read-only"); RB.setStatus(); };
@@ -149,6 +191,7 @@ function buildUI(thisObj) {
     w.onResizing = w.onResize = function () { this.layout.resize(); };
     RB.setStatus();
     if (w instanceof Window) { w.center(); w.show(); } else { w.layout.layout(true); w.layout.resize(); }
+    RB.checkUpdateNote();
     return w;
 }
 

@@ -10,8 +10,13 @@ Writes <Documents>/bridgeline/command.json atomically, waits for result.json wit
 prints it. Exit code 0 = ok, 1 = command error, 2 = timeout / panel not listening.
 <Documents> is the same folder the panel uses (on Windows also when Documents is moved to OneDrive).
 Set AEB_ROOT to override the exchange folder.
+
+Updates: after a successful `ping` the client checks (at most once a day) the latest release on GitHub and
+compares it, and the version of BridgeLine.jsx next to this file, with the panel that answered. If something is
+newer, the ping result gets an "update" field and update.json tells the panel to show a notice.
+Set BRIDGELINE_NO_UPDATE_CHECK=1 to skip the GitHub request (the local check still runs).
 """
-import json, os, subprocess, sys, time, uuid, argparse
+import json, os, re, subprocess, sys, time, uuid, argparse
 
 
 
@@ -32,6 +37,12 @@ def documents_dir():
 ROOT = os.environ.get("AEB_ROOT") or os.path.join(documents_dir(), "bridgeline")
 CMD = os.path.join(ROOT, "command.json")
 RES = os.path.join(ROOT, "result.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+RELEASES_API = "https://api.github.com/repos/oleksandr-stark/BridgeLine/releases/latest"
+RELEASES_PAGE = "https://github.com/oleksandr-stark/BridgeLine/releases"
+UPDATE_CACHE = os.path.join(ROOT, "update_check.json")   # last GitHub answer
+UPDATE_NOTE = os.path.join(ROOT, "update.json")          # read by the panel
+CHECK_EVERY = 24 * 3600
 
 
 def send(command, args, timeout=120, project=None):
@@ -74,6 +85,80 @@ def send(command, args, timeout=120, project=None):
     return {"ok": False, "error": "timeout after %ss (AE busy?)" % timeout}, 2
 
 
+def _ver(v):
+    """'1.0.10' -> (1, 0, 10); None if it is not a version."""
+    m = re.match(r"^v?(\d+(?:\.\d+)*)$", str(v or "").strip())
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
+
+
+def repo_version():
+    """Version of the panel file next to this client (what install.sh / install.ps1 would install)."""
+    for f in (os.path.join(HERE, "BridgeLine.jsx"), os.path.join(HERE, "src", "00_core.jsx")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                m = re.search(r'VERSION: "([0-9.]+)"', fh.read(4000))
+            if m:
+                return m.group(1)
+        except OSError:
+            pass
+    return None
+
+
+def latest_release():
+    """Latest public release (cached for a day). None when unknown or disabled."""
+    cache = {}
+    try:
+        with open(UPDATE_CACHE, encoding="utf-8") as f:
+            cache = json.load(f)
+    except Exception:
+        pass
+    if os.environ.get("BRIDGELINE_NO_UPDATE_CHECK") or time.time() - cache.get("checked", 0) < CHECK_EVERY:
+        return cache.get("latest")
+    cache["checked"] = time.time()  # also after a failure: do not retry on every ping
+    try:
+        import urllib.request
+        req = urllib.request.Request(RELEASES_API, headers={"User-Agent": "BridgeLine-client", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            tag = json.load(r).get("tag_name")
+        if _ver(tag):
+            cache["latest"] = tag.lstrip("v")
+    except Exception:
+        pass
+    try:
+        with open(UPDATE_CACHE, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+    except OSError:
+        pass
+    return cache.get("latest")
+
+
+def check_updates(res):
+    """Add res['update'] and write update.json for the panel if the panel is older than the files or the latest release."""
+    try:
+        installed = res["result"]["bridge"]
+    except (KeyError, TypeError):
+        return
+    inst, repo, latest = _ver(installed), repo_version(), latest_release()
+    installer = "install.ps1" if os.name == "nt" else "install.sh"
+    upd = None
+    newer_release = _ver(latest) and inst and _ver(latest) > inst and (not _ver(repo) or _ver(latest) > _ver(repo))
+    if not newer_release and _ver(repo) and inst and _ver(repo) > inst:
+        upd = {"installed": installed, "available": repo, "where": "files",
+               "message": "The panel (%s) is older than the files in %s (%s). Run %s there, then reopen the panel." % (installed, HERE, repo, installer)}
+    elif newer_release:
+        upd = {"installed": installed, "available": latest, "where": "release",
+               "message": "BridgeLine %s is available (installed %s): %s. Update the files in %s (git pull), then run %s and reopen the panel." % (latest, installed, RELEASES_PAGE, HERE, installer)}
+    try:
+        if upd:
+            res["update"] = upd
+            with open(UPDATE_NOTE, "w", encoding="utf-8") as f:
+                json.dump({"installed": installed, "available": upd["available"], "where": upd["where"]}, f)
+        elif os.path.exists(UPDATE_NOTE):
+            os.remove(UPDATE_NOTE)
+    except OSError:
+        pass
+
+
 def _result():
     # None while the file is missing or being replaced by the panel
     try:
@@ -110,6 +195,8 @@ def main():
         a = p.parse_args()
         args = json.load(open(a.args_file, encoding="utf-8")) if a.args_file else json.loads(a.args)
         res, code = send(a.command, args, a.timeout, a.project)
+        if a.command == "ping" and code == 0:
+            check_updates(res)
         text = json.dumps(res, ensure_ascii=False, indent=1)
         if a.max and len(text) > a.max:
             dump = os.path.join(ROOT, "last_result.json")

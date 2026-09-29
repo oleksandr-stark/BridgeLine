@@ -6,8 +6,9 @@
 
 ```
 ┌─────────────────────────────────────┐
-│ BridgeLine v1.0.3                   │  version
+│ BridgeLine v1.0.4                   │  version
 │ Listening  |  read-only             │  status line
+│ BridgeLine v1.0.5 is available: ... │  update notice (only when there is one)
 │ [x] Listen   [ ] Allow changes      │
 │ [Send selection]  [Undo last]       │
 │ ┌─────────────────────────────────┐ │
@@ -27,6 +28,16 @@ Shows whether the panel is listening and whether changes are allowed:
 - `Listening | CHANGES ALLOWED`: the agent can also change the project.
 - `Paused | ...`: **Listen** is off, commands are not picked up.
 - `Running: <command>`: a command is being executed right now.
+
+## Update notice
+
+An orange line under the status line, only when there is something to update:
+- `BridgeLine vX is available: ask your agent to update`: a newer release is on GitHub.
+- `Files are at vX: reinstall the panel`: the files in the BridgeLine folder were updated, but the installed panel is older.
+  Run `install.sh` / `install.ps1` and reopen the panel.
+
+The panel does not go online. Your agent's client checks GitHub after a `ping` (at most once a day) and leaves a note in
+the exchange folder that the panel reads. After you update and reopen the panel, the notice disappears with the next ping.
 
 ## Listen
 
