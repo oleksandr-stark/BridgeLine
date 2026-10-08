@@ -53,7 +53,10 @@ tools/
   edit_timemap.py       finds freeze holds / dropped frames: original render vs an edited version
   compare_frames.py     compares renderFrames output with a reference video at the same timecodes
   vo_gaps.py            finds quiet gaps in a voiceover
+  beats.py              beats / downbeats / hits of a music file -> CSV for markersFromFile (ffmpeg + numpy)
   gen_commands_doc.py   generates docs/COMMANDS.md
+  gen_args.py           argument names of every command (for the "did you mean" warning), run by build.sh
+  lint_es3.py           ExtendScript pitfalls node does not catch, run by build.sh
 docs/
   INSTALL.md            installation (script and manual)
   PANEL.md              the panel: buttons, fields, typical session
@@ -165,7 +168,7 @@ ExtendScript is ES3: no `Array.forEach/map/indexOf`, no `String.trim`, no built-
 
 ## Tools outside After Effects
 
-`tools/edit_timemap.py`, `tools/compare_frames.py` and `tools/vo_gaps.py` need ffmpeg; the first two also need numpy:
+`tools/edit_timemap.py`, `tools/compare_frames.py`, `tools/vo_gaps.py` and `tools/beats.py` need ffmpeg; all but `vo_gaps.py` also need numpy:
 ```bash
 python3 -m venv .venv && .venv/bin/pip install numpy
 ```
