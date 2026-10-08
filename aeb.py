@@ -5,6 +5,13 @@
   aeb.py COMMAND --args-file args.json
   --project /path/file.aep (or env AEB_PROJECT): panel refuses if another project is open
   aeb.py compare --comp NAME --time T --ref VIDEO --ref-time T2 [--out file.png]
+  aeb.py status [id]              what each panel is doing; with an id: the stored result of that command
+  aeb.py review --comp C [--range A B]   contact sheet of a range (ffmpeg)
+  aeb.py pixdiff A.png B.png      what changed between two frames and where (ffmpeg)
+  aeb.py textsheet export|apply   translation sheet (CSV) for text layers, see aeb_support.py
+  aeb.py render --comp C --out F  background render with aerender from a copy of the saved project; render-status / render-cancel
+  aeb.py doctor [--json]          check the installation (works without the panel)
+  aeb.py report [--raw]           bug report for the BridgeLine author (anonymized Markdown)
 
 Writes <Documents>/bridgeline/command.json atomically, waits for result.json with the same id,
 prints it. Exit code 0 = ok, 1 = command error, 2 = timeout / panel not listening.
@@ -16,7 +23,7 @@ compares it, and the version of BridgeLine.jsx next to this file, with the panel
 newer, the ping result gets an "update" field and update.json tells the panel to show a notice.
 Set BRIDGELINE_NO_UPDATE_CHECK=1 to skip the GitHub request (the local check still runs).
 """
-import json, os, re, subprocess, sys, time, uuid, argparse
+import glob, json, os, re, subprocess, sys, time, uuid, argparse
 
 
 
@@ -45,6 +52,49 @@ UPDATE_NOTE = os.path.join(ROOT, "update.json")          # read by the panel
 CHECK_EVERY = 24 * 3600
 
 
+def panel_statuses(max_age=None):
+    """Heartbeats written by the panels (one per After Effects): [{ae, panel, listen, allowChanges, project, busy, age}]."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(ROOT, "status", "*.json"))):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                st = json.load(fh)
+            st["age"] = round(time.time() - st.get("time", 0) / 1000.0, 1)
+            if max_age is None or st["age"] <= max_age:
+                out.append(st)
+        except Exception:
+            pass
+    return out
+
+
+def _same_path(a, b):
+    n = lambda p: os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(p))))
+    try:
+        return n(a) == n(b)
+    except Exception:
+        return False
+
+
+def explain_silence():
+    """One line about what the panels are doing, for timeout messages."""
+    sts = panel_statuses()
+    if not sts:
+        return "No panel heartbeat found (panel 1.0.5+ not open)."
+    parts = []
+    for st in sts:
+        who = "AE %s" % st.get("ae")
+        if st["age"] > 15:
+            if st.get("busy"):
+                parts.append("%s: busy with '%s' for %d s (long command, or a dialog is open)" % (who, st["busy"].get("command"), time.time() - st.get("busySince", 0) / 1000.0))
+            else:
+                parts.append("%s: silent for %d s (After Effects closed, frozen, or a modal dialog is open)" % (who, st["age"]))
+        elif not st.get("listen"):
+            parts.append("%s: Listen is off" % who)
+        else:
+            parts.append("%s: listening, project %s, changes %s" % (who, os.path.basename(st.get("project") or "-") or "-", "allowed" if st.get("allowChanges") else "off"))
+    return "Panels: " + "; ".join(parts) + "."
+
+
 def send(command, args, timeout=120, project=None):
     os.makedirs(ROOT, exist_ok=True)
     cid = uuid.uuid4().hex[:12]
@@ -56,10 +106,17 @@ def send(command, args, timeout=120, project=None):
             os.remove(CMD)
         except OSError:
             pass
+    project = project or os.environ.get("AEB_PROJECT")
+    if project:
+        # fast answer when fresh heartbeats show that no listening panel has this project open
+        recent = panel_statuses(max_age=3600)   # a busy panel does not refresh its heartbeat (ExtendScript is single-threaded)
+        fresh = [st for st in recent if st["age"] <= 6 and st.get("listen")]
+        if fresh and not any(st.get("project") and _same_path(st["project"], project) for st in recent) and not any(st.get("busy") for st in recent):
+            opened = ", ".join("AE %s: %s" % (st.get("ae"), st.get("project") or "unsaved project") for st in fresh)
+            return {"ok": False, "retry_safe": True, "error": "no listening After Effects has '%s' open (%s). Nothing was sent. Open the project, or pass the path of the open one." % (project, opened)}, 2
     tmp = CMD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         msg = {"id": cid, "command": command, "args": args}
-        project = project or os.environ.get("AEB_PROJECT")
         if project:
             msg["project"] = project
         json.dump(msg, f, ensure_ascii=False)
@@ -77,12 +134,35 @@ def send(command, args, timeout=120, project=None):
                 pass
             res = _result()
             if not res or res.get("id") != cid:
-                return {"ok": False, "error": "command not picked up in %s s: no listening AE has '%s' open, or the panel is not listening (Window > BridgeLine.jsx, tick Listen). The client uses %s; if the panel log shows another bridge folder, set AEB_ROOT to it." % (pickup, project or "the project", ROOT)}, 2
+                return {"ok": False, "retry_safe": True,
+                        "error": "command not picked up in %s s, nothing was run (safe to send again): no listening AE has '%s' open, or the panel is not listening (Window > BridgeLine.jsx, tick Listen). %s The client uses %s; if the panel log shows another bridge folder, set AEB_ROOT to it. `aeb.py doctor` checks the setup." % (pickup, project or "the project", explain_silence(), ROOT)}, 2
         res = _result()
         if res and res.get("id") == cid:
+            if res.get("ok") and command == "renderFrames":
+                wait_frames(res)
+                missing = [f["time"] for f in res["result"]["frames"] if f.get("state") in ("missing", "partial")]
+                if missing and not args.get("_retried"):
+                    # frames that never appeared: ask once more for just those times
+                    a2 = dict(args, times=missing, _retried=True)
+                    a2.pop("range", None); a2.pop("markers", None); a2.pop("time", None)
+                    r2, c2 = send(command, a2, timeout, project)
+                    if c2 == 0:
+                        again = {f["time"]: f for f in r2["result"]["frames"]}
+                        res["result"]["frames"] = [again.get(f["time"], f) if f["time"] in missing else f for f in res["result"]["frames"]]
+                        res["frameCheck"]["retried"] = missing
+                        res["frameCheck"]["ready"] = all(f.get("state") not in ("missing", "partial") for f in res["result"]["frames"])
             return res, (0 if res.get("ok") else 1)
         time.sleep(0.1)
-    return {"ok": False, "error": "timeout after %ss (AE busy?)" % timeout}, 2
+    if os.path.exists(CMD):
+        # still waiting in the folder: the panel never took it, so it is safe to withdraw and resend
+        try:
+            os.remove(CMD)
+            return {"ok": False, "retry_safe": True, "error": "timeout after %ss: the panel did not pick the command up, nothing was run (safe to send again). %s" % (timeout, explain_silence())}, 2
+        except OSError:
+            pass
+    return {"ok": False, "retry_safe": False, "id": cid,
+            "error": "timeout after %ss: the panel took the command but has not answered. It may still be running, or After Effects shows a dialog. %s "
+                     "Do NOT resend a change: `aeb.py status %s` shows its result when it finishes; otherwise read the state first." % (timeout, explain_silence(), cid)}, 2
 
 
 def _ver(v):
@@ -159,6 +239,71 @@ def check_updates(res):
         pass
 
 
+PNG_END = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+
+
+def png_state(path):
+    """'missing' | 'partial' | 'empty' (complete, every pixel transparent black) | 'ok'. 8-bit PNGs as written by AE."""
+    import struct, zlib
+    try:
+        with open(path, "rb") as f:
+            d = f.read()
+    except OSError:
+        return "missing"
+    if len(d) < 60 or not d.endswith(PNG_END):
+        return "partial"
+    try:
+        h = struct.unpack(">I", d[20:24])[0]
+        pos, idat = 8, []
+        while pos < len(d):
+            ln, typ = struct.unpack(">I4s", d[pos:pos + 8])
+            if typ == b"IDAT":
+                idat.append(d[pos + 8:pos + 8 + ln])
+            pos += 12 + ln
+        raw = zlib.decompress(b"".join(idat))
+        # every byte zero except at most one filter byte per row = nothing visible
+        if raw.count(0) >= len(raw) - h:
+            return "empty"
+    except Exception:
+        return "ok"
+    return "ok"
+
+
+def wait_frames(res, timeout=20):
+    """After renderFrames: wait until every PNG is complete (saveFrameToPng returns before the file is written),
+    then flag empty frames and frames identical to another one. Adds res['frameCheck'] and warnings."""
+    import hashlib
+    frames = ((res.get("result") or {}).get("frames")) or []
+    t0, states = time.time(), {}
+    while time.time() - t0 < timeout:
+        states = {fr["file"]: png_state(fr["file"]) for fr in frames}
+        if all(v not in ("missing", "partial") for v in states.values()):
+            break
+        time.sleep(0.25)
+    seen, same, warns = {}, [], res.setdefault("warnings", [])
+    for fr in frames:
+        st = states.get(fr["file"])
+        fr["state"] = st
+        if st in ("ok", "empty"):
+            hsh = hashlib.sha1(open(fr["file"], "rb").read()).hexdigest()
+            if hsh in seen:
+                same.append([seen[hsh], fr["time"]])
+            else:
+                seen[hsh] = fr["time"]
+    bad = [fr["time"] for fr in frames if fr.get("state") in ("missing", "partial")]
+    empty = [fr["time"] for fr in frames if fr.get("state") == "empty"]
+    if bad:
+        warns.append("frames not written completely after %d s: %s" % (timeout, bad))
+    if empty:
+        warns.append("empty (fully transparent) frames at %s: nothing visible, or the layers are off at that time" % empty)
+    if same:
+        warns.append("identical frames (time -> same picture as): %s - a static moment, or AE returned a cached frame" % same)
+    res["frameCheck"] = {"ready": not bad, "waited": round(time.time() - t0, 2), "empty": empty, "identical": same}
+    if not warns:
+        res.pop("warnings")
+    return res
+
+
 def _result():
     # None while the file is missing or being replaced by the panel
     try:
@@ -183,6 +328,20 @@ def compare(a):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        # aeb.py status [id]: panel heartbeats, or the stored result of a command by id
+        if len(sys.argv) > 2:
+            f = os.path.join(ROOT, "results", re.sub(r"[^A-Za-z0-9_-]", "_", sys.argv[2]) + ".json")
+            if os.path.exists(f):
+                print(open(f, encoding="utf-8").read()); sys.exit(0)
+            busy = [st for st in panel_statuses() if (st.get("busy") or {}).get("id") == sys.argv[2]]
+            print(json.dumps({"ok": False, "id": sys.argv[2], "state": "running" if busy else "unknown (not finished, or older than the last 100 results)",
+                              "panels": explain_silence()}, indent=1)); sys.exit(2)
+        print(json.dumps({"panels": panel_statuses(), "summary": explain_silence()}, ensure_ascii=False, indent=1)); sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] in ("doctor", "report", "review", "pixdiff", "render", "render-status", "render-cancel", "textsheet"):
+        sys.path.insert(0, HERE)
+        import aeb_support
+        sys.exit(aeb_support.main(sys.argv[1:]))
     if len(sys.argv) > 1 and sys.argv[1] == "compare":
         p = argparse.ArgumentParser()
         p.add_argument("cmd"); p.add_argument("--comp", required=True); p.add_argument("--time", type=float, required=True)

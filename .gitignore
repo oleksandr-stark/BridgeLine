@@ -6,3 +6,5 @@ tests/*.aep
 tests/out/
 tests/_backup/
 tests/Auto-Save/
+*.bridgeline-render-*.aep
+*.bridgeline-render-*.aep Logs/

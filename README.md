@@ -5,14 +5,17 @@ A ScriptUI panel for Adobe After Effects that lets an AI coding agent work with 
 - render single frames to PNG to see what it did;
 - make precise, undoable changes.
 
-The panel exposes 134 fixed commands and has no `eval`. It cannot run arbitrary code, launch shell commands or open network connections. It is not tied to any template or project.
+The panel exposes 151 fixed commands and has no `eval`. It cannot run arbitrary code, launch shell commands or open network connections. It is not tied to any template or project.
 
-Version 1.0.3. Tested on After Effects 2026 (26.5) and 27.0 Beta on macOS: 47/47 test scenarios pass.
+Version 1.0.5. Tested on After Effects 2026 (26.5) and 27.0 Beta on macOS: 52/52 test scenarios pass on both.
 **Windows** support is new in 1.0.3 and not yet tested on a real Windows machine: please report what breaks.
 
 ---
 
 ## Quick start
+
+Works with agents that run terminal commands (Claude Code, Codex, Gemini CLI) through `aeb.py`, and with MCP clients
+(Claude Desktop, Cursor...) through `bridgeline_mcp.py` - see [docs/INSTALL.md](docs/INSTALL.md).
 
 1. Install the panel: see **[docs/INSTALL.md](docs/INSTALL.md)**.
 2. In After Effects open **Window → BridgeLine.jsx** and tick **Listen**.
@@ -30,6 +33,8 @@ What each button and field in the panel does: **[docs/PANEL.md](docs/PANEL.md)**
 ```
 BridgeLine.jsx        built panel (the file you install in AE)
 aeb.py                  client: the agent sends commands through it
+aeb_support.py          client: doctor, report, review, pixdiff, render, textsheet
+bridgeline_mcp.py       MCP server (stdio) for Claude Desktop, Cursor and other MCP clients
 build.sh                builds src/*.jsx -> BridgeLine.jsx, runs checks, regenerates docs/COMMANDS.md
 install.sh              installs the panel into AE on macOS (uses sudo)
 install.ps1             installs the panel into AE on Windows (asks for administrator rights)
@@ -65,6 +70,9 @@ CHANGELOG.md            version history
   - `result.json`: the result `{id, ok, result | error, warnings, ms}`.
   - `log.txt`: the panel log. Output folders: `renders/`, `snapshots/`, `previews/`, `dumps/`, `compare/`.
   - `notes.json`, `selection.json`: written by the panel buttons (see [PANEL.md](docs/PANEL.md)).
+  - `status/<AE version>.json`: each panel's heartbeat (project, Listen, Allow changes, current command). The client uses it to
+    explain a silence and to refuse at once a command for a project no After Effects has open.
+  - `results/<id>.json`: the last 100 results by command id (`aeb.py status <id>`).
 - The panel checks for a new command every 300 ms while **Listen** is on.
 - Nothing here is specific to one AI vendor: any program that writes `command.json` and reads `result.json` can drive the panel. `aeb.py` is just the reference client.
 - Client usage:
@@ -78,6 +86,22 @@ CHANGELOG.md            version history
   - Exit codes: 0 ok, 1 command error, 2 panel not responding / timeout.
   - `--max N` truncates the printed output (the full result goes to `~/Documents/bridgeline/last_result.json`), `--max 0` disables truncation.
   - `python3 aeb.py compare --comp X --time T --ref video.mp4 --ref-time T2` puts a rendered frame next to a frame of a reference video (needs ffmpeg).
+
+## Checking results
+
+- `renderFrames` (panel) + the client: frames are complete when the command returns; empty and identical frames are flagged.
+- `python3 aeb.py review --comp C --range A B`: a contact sheet of a range (needs ffmpeg).
+- `python3 aeb.py pixdiff A.png B.png --heatmap diff.png`: how much changed between two frames and where (needs ffmpeg).
+- `python3 aeb.py render --comp C --out file.mp4`: video render in the background with aerender, from a copy of the saved
+  project, so After Effects stays free. `render-status` shows progress and ETA, `render-cancel` stops it.
+
+## When something does not work
+
+- `python3 aeb.py doctor` checks the installation and tells you what to fix (works even when the panel does not answer).
+- `python3 aeb.py report` makes a bug report for the BridgeLine author: versions, recent errors and the log, with names,
+  texts and paths replaced by placeholders. Ask your agent "prepare a BridgeLine bug report", read it, and send it to the
+  [BridgeLine Telegram group](https://t.me/+DyrBEadWcxllMmUy) or as a [GitHub issue](https://github.com/oleksandr-stark/BridgeLine/issues/new/choose).
+- Questions and ideas: the [Telegram group](https://t.me/+DyrBEadWcxllMmUy).
 
 ## Updates
 
@@ -118,8 +142,10 @@ The full command list is in [docs/COMMANDS.md](docs/COMMANDS.md).
 
 ## Testing
 
-1. In After Effects create a new, empty project and save it as `tests/bridge_test.aep` (this file is git-ignored).
-   Any other empty project works too: `AEB_TEST_PROJECT="/path/test.aep" python3 tests/run_tests.py`.
+1. In After Effects create a new, empty project and save it under a name that starts with `bridge_test`, e.g.
+   `tests/bridge_test.aep` (git-ignored). The tests use the open project with such a name - the name is the safety check,
+   because they create and delete comps. Or point to a file: `AEB_TEST_PROJECT="/path/bridge_test.aep" python3 tests/run_tests.py`.
+   An .aep opens only in its own After Effects version or newer, so keep one test project per version you test.
 2. Open the panel, tick **Listen** and **Allow changes**.
 3. Run `python3 tests/run_tests.py` (about 3 minutes) or single phases: `setup layers props fx project read edge`.
 4. The test removes its own `T_*` comps, builds everything from scratch and checks it by reading back and rendering frames.
@@ -163,6 +189,18 @@ See [docs/RECIPES.md](docs/RECIPES.md) for how they are used.
 - **Moving a text layer's inPoint can change its outPoint** (seen in AE 26.5). After `setTiming`, read the layer back and fix the outPoint if needed.
 - **Comp duration is rounded to frames** (13.56 s at 30 fps becomes 13.5667). Compare with a tolerance.
 - **Precomps with `startTime` ≠ 0** (e.g. 1 s handles): local time = parent time − startTime. Account for it when matching timecodes.
+
+### Measured by others, handled here
+
+Found on live After Effects by [Engine-Room-Games/after-effects-mcp](https://github.com/Engine-Room-Games/after-effects-mcp/blob/main/docs/fragile-areas-ae.md) (MIT) and checked against BridgeLine:
+- A TextDocument round trip can come back with another justification (LEFT -> CENTER, CENTER stored as RIGHT). Text commands read it back and set it again, or warn.
+- `layer.property("ADBE Audio Levels")` is null on audio layers; the `audioLevels` shortcut works (`placeAudioCues` uses it).
+- Enabling Time Remap resets the out point to the end of the source; `timeRemap` puts in/out back.
+- A new text layer takes tracking and other settings from the Character panel; `addText` starts neutral.
+- Adding an item to a shape group invalidates property objects taken before (BridgeLine re-fetches them).
+- `CompItem.duplicate()` is shallow: nested precomps stay shared - use `duplicateComp deep`.
+- `exportAsMotionGraphicsTemplate` refuses silently when the Essential Graphics panel of the comp is empty.
+- ExtendScript evaluates chained ternaries wrongly; `build.sh` refuses them.
 
 ## License
 

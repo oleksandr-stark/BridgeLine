@@ -6,9 +6,9 @@
 
 ```
 ┌─────────────────────────────────────┐
-│ BridgeLine v1.0.4                   │  version
+│ BridgeLine v1.0.5                   │  version
 │ Listening  |  read-only             │  status line
-│ BridgeLine v1.0.5 is available: ... │  update notice (only when there is one)
+│ BridgeLine v1.0.6 is available: ... │  update notice (only when there is one)
 │ [x] Listen   [ ] Allow changes      │
 │ [Send selection]  [Undo last]       │
 │ ┌─────────────────────────────────┐ │
@@ -103,6 +103,10 @@ The last lines of the log:
 - `ok (120 ms)`: it worked;
 - `! error text`: it failed (the agent gets the same message);
 - `~ command: addressed to another project...`: the command was meant for another After Effects instance and was left for it.
+
+The full log is `log.txt` in the exchange folder. When it grows over ~1 MB it is moved to `log.1.txt` (one old file is kept).
+Each start writes a line with the BridgeLine, After Effects and system versions, and a failed command logs its full arguments:
+that is what `aeb.py report` puts into a bug report.
 
 ## A typical session
 

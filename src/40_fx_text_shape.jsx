@@ -19,7 +19,7 @@ function getEffect(l, ref) {
     var fx = l.property("ADBE Effect Parade");
     if (typeof ref === "number") { if (ref < 1 || ref > fx.numProperties) fail("Effect index out of range on " + l.name); return fx.property(ref); }
     var e = childByKey(fx, ref);
-    if (!e) fail("Effect '" + ref + "' not found on " + l.name + ". Effects: " + childNames(fx));
+    if (!e) fail("Effect '" + ref + "' not found on '" + l.name + "'. Effects: " + childNames(fx));
     return e;
 }
 
@@ -29,7 +29,7 @@ def("addEffect", { w: 1 }, "Add effect. args: comp, layer(s)|match, effect (matc
         var l = ls[i];
         withUnlocked(l, function () {
             var fx = l.property("ADBE Effect Parade");
-            if (!fx.canAddProperty(mn)) fail("Effect cannot be added to " + l.name + ": " + mn);
+            if (!fx.canAddProperty(mn)) fail("Effect cannot be added to '" + l.name + "': " + mn);
             var e = fx.addProperty(mn), ix = e.propertyIndex, k;
             if (a.name) e.name = a.name;
             if (a.index !== undefined) { e.moveTo(a.index); ix = a.index; }
@@ -197,13 +197,29 @@ function textProp(l) {
     if (!(l instanceof TextLayer)) fail("Not a text layer: " + l.name);
     return l.property("ADBE Text Properties").property("ADBE Text Document");
 }
+// A TextDocument round trip can land a different justification than the one written (measured on AE 26.3 by
+// Engine-Room-Games/after-effects-mcp: LEFT came back CENTER, CENTER stored as RIGHT). Read it back and write it once more.
+function checkJustification(l, want, read, write) {
+    var got; try { got = read().justification; } catch (e) { return; }
+    if (want === undefined || got === want) return;
+    try { var d = read(); d.justification = want; write(d); got = read().justification; } catch (e2) {}
+    if (got !== want) warn("Justification of '" + l.name + "' is " + enumName("ParagraphJustification", got) + ", expected " + enumName("ParagraphJustification", want));
+}
 function editDoc(l, time, fn) {
     var p = textProp(l);
     withUnlocked(l, function () {
-        if (time !== undefined) { var d = p.valueAtTime(time, true); fn(d); p.setValueAtTime(time, d); }
-        else if (p.numKeys > 0) {
-            for (var k = 1; k <= p.numKeys; k++) { var dk = p.keyValue(k); fn(dk); p.setValueAtKey(k, dk); }
-        } else { var d2 = p.value; fn(d2); p.setValue(d2); }
+        if (time !== undefined) {
+            var d = p.valueAtTime(time, true); fn(d); p.setValueAtTime(time, d);
+            checkJustification(l, d.justification, function () { return p.valueAtTime(time, true); }, function (x) { p.setValueAtTime(time, x); });
+        } else if (p.numKeys > 0) {
+            for (var k = 1; k <= p.numKeys; k++) {
+                var dk = p.keyValue(k); fn(dk); p.setValueAtKey(k, dk);
+                (function (kk, want) { checkJustification(l, want, function () { return p.keyValue(kk); }, function (x) { p.setValueAtKey(kk, x); }); })(k, dk.justification);
+            }
+        } else {
+            var d2 = p.value; fn(d2); p.setValue(d2);
+            checkJustification(l, d2.justification, function () { return p.value; }, function (x) { p.setValue(x); });
+        }
     });
 }
 
@@ -315,8 +331,84 @@ def("replaceText", { w: 1 }, "Find/replace in text layers project-wide, keeping 
     return { dryRun: !!a.dryRun, count: res.length, changed: res };
 });
 
-def("replaceFont", { w: 1 }, "Replace font project-wide, including per-character runs. args: from (PostScript name or regex), to (PostScript name), [regex], [comps|compMatch], [dryRun]", function (a) {
+def("textLayout", {}, "How text composes: lines, overflow, wrapping, font coverage - without rendering. args: comp, [layer(s)|match] (default all text layers), [time], [full] untruncated text. Per layer: text, font, size, boxText, boxSize, lines (composed), paragraphs, rewrapped (AE broke a line), overflow (box text that does not fit, AE 24.6+), missingGlyphs (AE 25.1+), bounds", function (a) {
+    var c = getComp(a.comp), ls = (a.layer || a.layers || a.match) ? getLayers(c, a) : getLayers(c, { layerType: "text" }), out = [];
+    for (var i = 0; i < ls.length; i++) {
+        var l = ls[i];
+        if (!(l instanceof TextLayer)) continue;
+        var p = textProp(l), d = a.time !== undefined ? p.valueAtTime(parseTime(a.time, c.frameRate), false) : p.value;
+        var o = { layer: lref(l), text: a.full ? String(d.text) : shorten(d.text, 300), font: d.font, fontSize: rnd(d.fontSize), boxText: !!d.boxText };
+        var paras = String(d.text).split(/\r\n|\r|\n/).length;
+        o.paragraphs = paras;
+        try { o.lines = d.composedLineCount; } catch (e) {}
+        if (o.lines === undefined) { try { o.lines = d.baselineLocs.length / 2; } catch (e) {} }
+        if (o.lines !== undefined) o.rewrapped = o.lines > paras;
+        if (d.boxText) {
+            try { o.boxSize = rnd(d.boxTextSize); } catch (e) {}
+            try { o.overflow = !!d.boxOverflow; } catch (e) {}
+            if (o.lines === 0 && String(d.text).length) o.overflow = true;
+        }
+        var miss = missingGlyphs(d.font, d.text);
+        if (miss.length) o.missingGlyphs = miss.join("");
+        try { o.bounds = compBounds(l, a.time !== undefined ? parseTime(a.time, c.frameRate) : c.time); } catch (e) {}
+        out.push(o);
+    }
+    var bad = [];
+    for (i = 0; i < out.length; i++) if (out[i].overflow || out[i].missingGlyphs) bad.push(out[i].layer.name);
+    return { count: out.length, problems: bad, layers: out };
+});
+
+def("fitBox", { w: 1 }, "A plate (shape rectangle) behind a text layer that fits the text plus padding. It is parented to the text and placed below it; rigged:true (default) keeps fitting when the text changes (sourceRectAtTime expressions by layer name, with the static size as fallback). args: comp, layer (text), [name] (default '<layer> plate'), [padding] number or [x,y] (20), [roundness] (0), [color] ('#000000'), [opacity] (100), [rigged=true], [time]", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer);
+    if (!(l instanceof TextLayer)) fail("fitBox needs a text layer: '" + l.name + "'");
+    var pad = isArr(a.padding) ? a.padding : [num(a.padding, 20), num(a.padding, 20)];
+    var t = a.time !== undefined ? parseTime(a.time, c.frameRate) : Math.max(l.inPoint, Math.min(c.time, l.outPoint - c.frameDuration));
+    var r = l.sourceRectAtTime(t, false), w = r.width + 2 * pad[0], h = r.height + 2 * pad[1];
+    var sl = c.layers.addShape();
+    sl.name = a.name || (l.name + " plate");
+    sl.moveAfter(l);
+    sl.inPoint = l.inPoint; sl.outPoint = l.outPoint;
+    try { if (l.threeDLayer) sl.threeDLayer = true; } catch (e) {}
+    var g = sl.property("ADBE Root Vectors Group").addProperty("ADBE Vector Group");
+    g.name = "Plate";
+    var gc = g.property("ADBE Vectors Group");
+    gc.addProperty("ADBE Vector Shape - Rect");
+    gc.addProperty("ADBE Vector Graphic - Fill");
+    // adding to a group invalidates property objects taken before: fetch them now
+    g = sl.property("ADBE Root Vectors Group").property(1); gc = g.property("ADBE Vectors Group");
+    var rect = gc.property("ADBE Vector Shape - Rect"), fill = gc.property("ADBE Vector Graphic - Fill");
+    rect.property("ADBE Vector Rect Size").setValue([w, h]);
+    rect.property("ADBE Vector Rect Position").setValue([r.left + r.width / 2, r.top + r.height / 2]);
+    rect.property("ADBE Vector Rect Roundness").setValue(num(a.roundness, 0));
+    fill.property("ADBE Vector Fill Color").setValue(colorIn(a.color || "#000000"));
+    fill.property("ADBE Vector Fill Opacity").setValue(num(a.opacity, 100));
+    // in the text's own space: parent without a jump, then put the plate's origin on the text origin
+    sl.setParentWithJump(l);
+    var tr = sl.property("ADBE Transform Group");
+    tr.property("ADBE Anchor Point").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
+    tr.property("ADBE Position").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
+    var rigged = a.rigged !== false, err = null;
+    if (rigged) {
+        var ref = 'thisComp.layer("' + l.name.replace(/"/g, '\\"') + '")';
+        setExpr(rect.property("ADBE Vector Rect Size"), "var r = " + ref + ".sourceRectAtTime(time, false); [r.width + " + (2 * pad[0]) + ", r.height + " + (2 * pad[1]) + "]");
+        setExpr(rect.property("ADBE Vector Rect Position"), "var r = " + ref + ".sourceRectAtTime(time, false); [r.left + r.width / 2, r.top + r.height / 2]");
+        err = exprEval(rect.property("ADBE Vector Rect Size")) || exprEval(rect.property("ADBE Vector Rect Position"));
+        if (err) warn("Rig expression error, the static size is used: " + err);
+    }
+    var out = created(c, sl);
+    out.size = rnd([w, h]); out.rigged = rigged && !err; out.parent = l.name;
+    return out;
+});
+
+def("checkGlyphs", {}, "Which characters a font cannot show (AE 25.1+). args: font (PostScript name, 'Family Style' or 'Family'), text", function (a) {
+    var ps = resolveFont(a.font), miss = missingGlyphs(ps, a.text || "");
+    var ok = true; try { ok = !!app.fonts.getFontsByPostScriptName(ps)[0].hasGlyphsFor; } catch (e) { ok = false; }
+    return { font: ps, checked: ok, missing: miss.join(""), complete: ok && !miss.length };
+});
+
+def("replaceFont", { w: 1 }, "Replace font project-wide, including per-character runs. 'to' may be a PostScript name, 'Family Style' or 'Family'; layers whose text the new font cannot show are listed (missingGlyphs). args: from (PostScript name or regex), to, [regex], [comps|compMatch], [dryRun]", function (a) {
     var comps = getComps(a, true), res = [];
+    a.to = resolveFont(a.to);
     function hit(f) { return a.regex ? toRegex(a.from).test(f) : f === a.from; }
     for (var ci = 0; ci < comps.length; ci++) {
         var c = comps[ci];
@@ -334,10 +426,15 @@ def("replaceFont", { w: 1 }, "Replace font project-wide, including per-character
             };
             if (a.dryRun) { var p = textProp(l); fn(p.numKeys ? p.keyValue(1) : p.value); }
             else editDoc(l, undefined, fn);
-            if (found) res.push({ comp: c.name, layer: lref(l), chars: found });
+            if (found) {
+                var rr = { comp: c.name, layer: lref(l), chars: found };
+                var tp = textProp(l), mg = missingGlyphs(a.to, (tp.numKeys ? tp.keyValue(1) : tp.value).text);
+                if (mg.length) { rr.missingGlyphs = mg.join(""); warn("'" + a.to + "' has no glyphs for '" + rr.missingGlyphs + "' in " + c.name + " / " + l.name); }
+                res.push(rr);
+            }
         }
     }
-    return { dryRun: !!a.dryRun, count: res.length, layers: res };
+    return { dryRun: !!a.dryRun, to: a.to, count: res.length, layers: res };
 });
 
 def("setTextBox", { w: 1 }, "Resize paragraph (box) text. args: comp, layer(s), size:[w,h], [position:[x,y]]", function (a) {
@@ -440,6 +537,51 @@ def("setPathVertices", { w: 1 }, "Set a path (shape path or mask). args: comp, l
     if (p.propertyValueType !== PropertyValueType.SHAPE) fail("Not a path property: " + propPath(p));
     withUnlocked(l, function () { setPropValue(p, a, a.time); });
     return pref(p);
+});
+
+def("setPathKeys", { w: 1 }, "Animate a mask or shape path from data (roto from another tool): keys from a JSON file or inline. Times in comp seconds, or in the layer's own time (timeBase:'layer' -> start time and stretch applied), or frames with fps. args: comp, layer, path (mask, shape path group or its Path), file (JSON) | keys:[{t|frame, vertices, [inTangents], [outTangents], [closed]}], [timeBase] comp|layer, [fps] when keys have 'frame', [clear] remove existing keys first", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer), p = resolveProp(l, a.path);
+    if (p.matchName === "ADBE Vector Shape - Group") p = p.property("ADBE Vector Shape");
+    else if (p.matchName === "ADBE Mask Atom") p = p.property("ADBE Mask Shape");
+    if (p.propertyValueType !== PropertyValueType.SHAPE) fail("Not a path property: " + propPath(p));
+    var data = a.keys;
+    if (!data && a.file) { var j = jsonParse(readText(a.file)); data = isArr(j) ? j : (j.keys || j.frames); if (!a.fps && j.fps) a.fps = j.fps; }
+    if (!data || !data.length) fail("keys or file with keys is required");
+    var times = [], shapes = [], i;
+    for (i = 0; i < data.length; i++) {
+        var k = data[i], t = k.t !== undefined ? parseTime(k.t, c.frameRate) : (k.frame !== undefined ? k.frame / num(a.fps, c.frameRate) : null);
+        if (t === null) fail("key " + i + " needs t or frame");
+        if (a.timeBase === "layer") t = l.startTime + t * l.stretch / 100;   // layer (source) time -> comp time
+        times.push(t); shapes.push(shapeIn(k));
+    }
+    var mode = "setValuesAtTimes";
+    withUnlocked(l, function () {
+        if (a.clear) for (var q = p.numKeys; q >= 1; q--) p.removeKey(q);
+        try { p.setValuesAtTimes(times, shapes); }
+        catch (e) { mode = "setValueAtTime"; for (var n = 0; n < times.length; n++) p.setValueAtTime(times[n], shapes[n]); }
+    });
+    return { path: propPath(p), keys: times.length, from: rnd(times[0]), to: rnd(times[times.length - 1]), mode: mode };
+});
+
+def("trackerToNull", { w: 1 }, "Turn a Motion Tracker track point into a null that follows it (keys copied from the attach point; the null is parented to the tracked layer, so it follows that layer too). args: comp, layer (with the tracker), [tracker] name/index (1), [trackPoint] name/index (1), [name] (default '<layer> track')", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer), trs = l.property("ADBE MTrackers");
+    if (!trs || !trs.numProperties) fail("'" + l.name + "' has no Motion Tracker (Window > Tracker > Track Motion first)");
+    var tk = childByKey(trs, a.tracker !== undefined ? a.tracker : 1);
+    if (!tk) fail("Tracker not found: " + a.tracker + ". Trackers: " + childNames(trs));
+    var tp = childByKey(tk, a.trackPoint !== undefined ? a.trackPoint : 1);
+    if (!tp) fail("Track point not found: " + a.trackPoint + ". Track points: " + childNames(tk));
+    var att = tp.property("ADBE MTrack Pt Attach Pt");
+    if (!att || !att.numKeys) fail("The track point has no tracked keys");
+    var n = c.layers.addNull();
+    n.name = a.name || (l.name + " track");
+    n.moveBefore(l);
+    n.setParentWithJump(l);   // the attach point is in the tracked layer's space: parent first, then copy the values as they are
+    var P = n.property("ADBE Transform Group").property("ADBE Position"), times = [], vals = [];
+    for (var k = 1; k <= att.numKeys; k++) { times.push(att.keyTime(k)); vals.push(att.keyValue(k)); }
+    P.setValuesAtTimes(times, vals);
+    var out = created(c, n);
+    out.keys = times.length; out.parent = l.name;
+    return out;
 });
 
 def("setGradient", { w: 1 }, "Gradient fill/stroke geometry (colors can NOT be set by scripting - only type/points/highlight). args: comp, layer, path (to Gradient Fill/Stroke), [type] linear|radial, [start:[x,y]], [end:[x,y]], [highlightLength], [highlightAngle], [opacity]", function (a) {

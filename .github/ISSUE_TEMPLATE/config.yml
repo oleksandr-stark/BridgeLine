@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: BridgeLine Telegram group
+    url: https://t.me/+DyrBEadWcxllMmUy
+    about: Questions, ideas, quick help. Bug reports are welcome there too (paste the output of `aeb.py report`).

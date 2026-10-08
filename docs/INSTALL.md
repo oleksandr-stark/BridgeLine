@@ -132,6 +132,25 @@ What the rest of the panel does: [PANEL.md](PANEL.md).
    On Windows: `python aeb.py ping --project "C:\path\to\Your Project.aep"`.
    A working bridge answers with `"ok": true`, the AE version, the project path and `bridgeFolder`, the exchange folder.
 
+## Use from an MCP client (Claude Desktop, Cursor, ...)
+
+Agents that run terminal commands (Claude Code, Codex, Gemini CLI) can use `aeb.py` directly. Apps that talk to tools
+through MCP use `bridgeline_mcp.py` instead (Python 3 only, no packages to install):
+
+- **Claude Code:** `claude mcp add bridgeline -- python3 /path/to/BridgeLine/bridgeline_mcp.py`
+- **Claude Desktop** (Settings > Developer > Edit Config) or **Cursor** (`.cursor/mcp.json`):
+  ```json
+  {"mcpServers": {"bridgeline": {"command": "python3", "args": ["/path/to/BridgeLine/bridgeline_mcp.py"],
+                                 "env": {"AEB_PROJECT": "/path/to/Your Project.aep"}}}}
+  ```
+  On Windows use `"command": "python"` and a Windows path. `AEB_PROJECT` is optional (the tools take a `project` argument).
+
+Tools: `bridgeline_command` (any panel command), `bridgeline_help`, `bridgeline_frames` (frames come back as images),
+`bridgeline_review` (contact sheet), `bridgeline_pixdiff`, `bridgeline_status`, `bridgeline_doctor`, `bridgeline_report`,
+`bridgeline_render` / `bridgeline_render_status`. The instructions are served as the prompt `bridgeline`, the command list
+as the resource `bridgeline://commands`. `BRIDGELINE_MCP_ALL_TOOLS=1` adds one tool per panel command (140+ tools - many
+clients handle that badly). The panel in After Effects still needs Listen, and Allow changes for edits.
+
 ## Where the files go
 
 The panel and the client exchange files in a `bridgeline` folder inside your Documents folder:
@@ -159,6 +178,9 @@ Delete `BridgeLine.jsx` from `ScriptUI Panels` and, if you like, the exchange fo
 
 ## Troubleshooting
 
+Start with `python3 aeb.py doctor` (Windows: `python aeb.py doctor`): it checks everything below that can be checked
+automatically and says what to fix. To report a problem, see "When something does not work" in the README.
+
 | Problem | What to check |
 |---|---|
 | No "BridgeLine.jsx" in the Window menu | Restart After Effects. Check that the file is in `ScriptUI Panels` of the version you run. |
@@ -168,6 +190,8 @@ Delete `BridgeLine.jsx` from `ScriptUI Panels` and, if you like, the exchange fo
 | "Project guard: command is for ... but the open project is ..." | The path in `--project` does not match the project open in AE. The project must be saved. |
 | "... changes the project, but 'Allow changes' is off" | Expected: tick **Allow changes** when you agree to let the agent change the project. |
 | "Writing outside allowed folders is blocked" | Output files may only go to the `bridgeline` exchange folder, the project folder or its parent folder. |
+| Windows, first start of AE on a virtual machine or without a supported GPU | AE shows a "System Compatibility Report" window first; scripts and the panel are blocked until you close it. |
+| Folder names with spaces or non-English letters | Should work; if a path fails, quote it (`--project "C:\My Work\Proj.aep"`) and include `aeb.py report` in your issue. |
 | Two After Effects versions are open | Always pass `--project`. Each command then goes to the instance that has that project open. |
 
 The panel log is `log.txt` in the exchange folder (the agent can read it with `aeb.py getLog`).

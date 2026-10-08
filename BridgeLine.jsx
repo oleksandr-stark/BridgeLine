@@ -10,7 +10,7 @@
 */
 (function (thisObj) {
 
-var RB = { VERSION: "1.0.4", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
+var RB = { VERSION: "1.0.5", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
 RB.root = Folder.myDocuments.fsName + "/bridgeline";
 RB.cmdPath = RB.root + "/command.json";
 RB.resPath = RB.root + "/result.json";
@@ -700,6 +700,51 @@ function textDocOut(d) {
     try { o.justification = enumName("ParagraphJustification", d.justification); } catch (e) {}
     return o;
 }
+// ---------------------------------------------------------------- fonts
+// "Montserrat-Bold" (PostScript), "Montserrat Bold" or "Montserrat" -> PostScript name; unknown -> error with similar families.
+// Needs the fonts API (AE 24+); on older versions the name is passed through unchanged.
+function resolveFont(name) {
+    var n = String(name), F = null;
+    try { F = app.fonts; if (!F || !F.getFontsByPostScriptName) return n; } catch (e) { return n; }
+    try { if (F.getFontsByPostScriptName(n).length) return n; } catch (e1) { return n; }
+    var parts = n.split(" "), i, list;
+    for (i = parts.length - 1; i >= 1; i--) {
+        try {
+            list = F.getFontsByFamilyNameAndStyleName(parts.slice(0, i).join(" "), parts.slice(i).join(" "));
+            if (list && list.length) return list[0].postScriptName;
+        } catch (e2) {}
+    }
+    var fams = [], lk = n.toLowerCase(), first = lk.split(/[\s\-]/)[0], all = F.allFonts, fam, f;
+    for (i = 0; i < all.length; i++) {
+        fam = all[i];
+        if (!fam.length) continue;
+        if (fam[0].familyName.toLowerCase() === lk) {   // family only: Regular, else the first style
+            for (f = 0; f < fam.length; f++) if (/^(regular|normal|roman|book)$/i.test(fam[f].styleName)) return fam[f].postScriptName;
+            return fam[0].postScriptName;
+        }
+        if (first.length > 2 && fam[0].familyName.toLowerCase().indexOf(first) >= 0 && fams.length < 8) {
+            var st = []; for (f = 0; f < fam.length && f < 6; f++) st.push(fam[f].styleName);
+            fams.push(fam[0].familyName + " (" + st.join(", ") + ")");
+        }
+    }
+    fail("Font not found: '" + n + "'. Use a PostScript name, 'Family Style' or 'Family'." + (fams.length ? " Similar: " + fams.join("; ") : ""));
+}
+// characters of text the font has no glyphs for ([] if all are there or the check is not available: AE 25.1+)
+function missingGlyphs(psName, text) {
+    var miss = [], seen = {};
+    try {
+        var fl = app.fonts.getFontsByPostScriptName(psName);
+        if (!fl || !fl.length || !fl[0].hasGlyphsFor) return miss;
+        var fo = fl[0], t = String(text);
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i);
+            if (seen[ch] || /\s/.test(ch)) continue;
+            seen[ch] = 1;
+            if (!fo.hasGlyphsFor(ch)) miss.push(ch);
+        }
+    } catch (e) {}
+    return miss;
+}
 function styleApply(target, o, isRange) {
     if (o.leading !== undefined && o.autoLeading === undefined && !isRange) o.autoLeading = false;
     for (var i = 0; i < TD_WRITE.length; i++) {
@@ -713,6 +758,7 @@ function styleApply(target, o, isRange) {
             if (k === "strokeColor" && o.applyStroke === undefined) target.applyStroke = true;
         }
         if (k === "text" && isArr(v)) v = v.join("\r");
+        if (k === "font") v = resolveFont(v);
         if (k === "allCaps" || k === "smallCaps") {
             try { target.fontCapsOption = v ? (k === "allCaps" ? FontCapsOption.FONT_ALL_CAPS : FontCapsOption.FONT_SMALL_CAPS) : FontCapsOption.FONT_NORMAL_CAPS; continue; } catch (e0) {}
         }
@@ -749,6 +795,14 @@ function valIn(p, v, atTime) {
     if (T === PropertyValueType.CUSTOM_VALUE) fail("Custom-value properties (curves, gradient colors...) cannot be set by script: " + propPath(p));
     if (T === PropertyValueType.COLOR) return colorIn(v);
     if (T === PropertyValueType.LAYER_INDEX && typeof v === "string") return getLayer(propLayer(p).containingComp, v).index;
+    if (T === PropertyValueType.OneD && typeof v === "string" && isNaN(Number(v))) {
+        // a popup / dropdown item by its label (AE 26+)
+        var opts = null;
+        try { opts = p.propertyParameters; } catch (e) {}
+        if (!opts || !opts.length) fail("'" + v + "' is not a number, and " + propPath(p) + " has no menu labels (needs AE 26+ and a popup property)");
+        for (var oi = 0; oi < opts.length; oi++) if (String(opts[oi]).toLowerCase() === v.toLowerCase()) return oi + 1;
+        fail("No item '" + v + "' in " + propPath(p) + ". Items: " + opts.join(", "));
+    }
     if (T === PropertyValueType.OneD || T === PropertyValueType.LAYER_INDEX || T === PropertyValueType.MASK_INDEX) {
         if (isArr(v)) v = v[0];
         if (typeof v === "boolean") v = v ? 1 : 0;
@@ -842,10 +896,18 @@ function remapKeys(p, fn) {
         caps.push(c);
     }
     if (!moved) return 0;
+    var hit = keyCollisions(caps);
+    if (hit) fail("Keys would land on the same time in " + propPath(p) + " (" + hit + "). Nothing was changed.");
     for (k = n; k >= 1; k--) p.removeKey(k);
     for (i = 0; i < caps.length; i++) keyRestore(p, caps[i], caps[i].nt);
     if (p.numKeys < caps.length) warn("Some keys collided on the same time in " + propPath(p));
     return moved;
+}
+// "t1 and t2 -> t" for the first pair of captured keys whose new times (nt) coincide, or null
+function keyCollisions(caps) {
+    var s = caps.slice(0).sort(function (x, y) { return x.nt - y.nt; });
+    for (var i = 1; i < s.length; i++) if (Math.abs(s[i].nt - s[i - 1].nt) < 1e-4) return rnd(s[i - 1].t) + " s and " + rnd(s[i].t) + " s -> " + rnd(s[i].nt) + " s";
+    return null;
 }
 function easeArray(p, k, spec, side) {
     var cur = side === "in" ? p.keyInTemporalEase(k) : p.keyOutTemporalEase(k), r = [];
@@ -980,6 +1042,8 @@ function dumpProp(p, o, depth) {
             if (p.numKeys > 0) r.k = keysOut(p, o.ease);
             else r.v = valOut(p, p.value);
         } catch (e) { r.err = errStr(e); }
+        // popup / dropdown menus (AE 26+): the label of the current item and all options
+        try { if (p.propertyParameters && p.propertyParameters.length) { r.label = p.valueText; r.options = p.propertyParameters; } } catch (e) {}
         if (hasX) {
             r.x = o.maxExpr ? shorten(p.expression, o.maxExpr) : p.expression;
             if (!p.expressionEnabled) r.xOff = true;
@@ -1166,23 +1230,75 @@ function parseTime(s, fps) {
 
 // ---------------------------------------------------------------- registry & dispatch
 // flags: {w: write command, noUndo: do not wrap in undo group}
-function def(name, flags, doc, fn) { RB.cmds[name] = { w: !!flags.w, noUndo: !!flags.noUndo, doc: doc, fn: fn }; }
+function def(name, flags, doc, fn) { RB.cmds[name] = { w: !!flags.w, noUndo: !!flags.noUndo, irreversible: !!flags.irreversible, doc: doc, fn: fn }; }
 RB.allowWrites = function () { return !!(RB.ui && RB.ui.allow && RB.ui.allow.value); };
+// app.project.revision grows with every change to the project; null if this AE has no such property
+function projRevision() { try { var r = app.project.revision; return (r === undefined || r === null) ? null : r; } catch (e) { return null; } }
+// ---------------------------------------------------------------- argument check ("did you mean")
+function editDistance(x, y) {
+    var m = x.length, n = y.length, d = [], i, j;
+    for (i = 0; i <= m; i++) { d[i] = [i]; }
+    for (j = 0; j <= n; j++) d[0][j] = j;
+    for (i = 1; i <= m; i++) for (j = 1; j <= n; j++)
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (x.charAt(i - 1) === y.charAt(j - 1) ? 0 : 1));
+    return d[m][n];
+}
+function closest(word, list) {
+    var best = null, bd = 99, lw = String(word).toLowerCase();
+    for (var i = 0; i < list.length; i++) {
+        var dd = editDistance(lw, String(list[i]).toLowerCase());
+        if (dd < bd) { bd = dd; best = list[i]; }
+    }
+    return (best !== null && bd <= Math.max(2, Math.floor(lw.length / 3))) ? best : null;
+}
+// unknown argument keys are ignored by the commands; say so instead of failing silently (RB.ARGS is generated)
+function checkArgs(command, args) {
+    var known = RB.ARGS ? RB.ARGS[command] : null, n = 0;
+    if (!known || !args) return 0;
+    var padded = " " + known + " ";
+    if (padded.indexOf(" * ") >= 0) return 0;
+    var list = known.split(" ");
+    for (var key in args) {
+        if (!has(args, key)) continue;
+        if (padded.indexOf(" " + key + " ") >= 0) continue;
+        var near = closest(key, list);
+        warn("Unknown argument '" + key + "' for " + command + " was ignored." + (near ? " Did you mean '" + near + "'?" : " Known: " + list.join(", ").replace("_retried, ", "")));
+        n++;
+    }
+    return n;
+}
+RB.suppressDepth = 0;
 RB.run = function (command, args, inBatch) {
     var c = RB.cmds[command];
-    if (!c) fail("Unknown command: " + command + " (use 'help')");
+    if (!c) { var near = closest(command, keysOf(RB.cmds)); fail("Unknown command: " + command + (near ? ". Did you mean '" + near + "'?" : "") + " (use 'help')"); }
+    checkArgs(command, args);
     if (c.w && !RB.allowWrites()) fail("'" + command + "' changes the project, but 'Allow changes' is off in the BridgeLine panel");
-    if (!c.w || c.noUndo || inBatch) return c.fn(args || {});
-    app.beginUndoGroup("BridgeLine: " + command);
-    try { return c.fn(args || {}); } finally { app.endUndoGroup(); }
+    // A modal alert from an effect, import or render would block AE (and the panel) until someone clicks.
+    // Menu commands are left alone: some of them are meant to show their dialog.
+    var suppress = command !== "menuCommand" && RB.suppressDepth === 0;
+    if (suppress) { try { app.beginSuppressDialogs(); RB.suppressDepth++; } catch (es) { suppress = false; } }
+    try {
+        if (!c.w || c.noUndo || inBatch) return c.fn(args || {});
+        app.beginUndoGroup("BridgeLine: " + command);
+        try { return c.fn(args || {}); } finally { app.endUndoGroup(); }
+    } finally {
+        if (suppress) { RB.suppressDepth--; try { app.endSuppressDialogs(false); } catch (ee) {} }
+    }
 };
+RB.LOG_MAX = 1000000; // bytes; log.txt is moved to log.1.txt (one old file kept)
 RB.log = function (s) {
     var line = stamp().substr(11) + "  " + s;
     RB.logLines.push(line);
     if (RB.logLines.length > 500) RB.logLines.shift();
     try {
         var f = new File(RB.root + "/log.txt");
-        f.encoding = "UTF-8";
+        if (f.exists && f.length > RB.LOG_MAX) {
+            var old = new File(RB.root + "/log.1.txt");
+            if (old.exists) old.remove();
+            f.rename("log.1.txt");
+            f = new File(RB.root + "/log.txt");
+        }
+        f.encoding = "UTF-8"; f.lineFeed = "Unix";
         if (f.open("a")) { f.writeln(stamp().substr(0, 10) + " " + line); f.close(); }
     } catch (e) {}
     if (RB.ui && RB.ui.list) {
@@ -1193,15 +1309,177 @@ RB.log = function (s) {
         } catch (e) {}
     }
 };
+// ================================================================ GENERATED by tools/gen_args.py - do not edit
+// argument names each command reads; RB.run warns about others
+RB.ARGS = {
+    activeState: "_retried",
+    addAdjustment: "_retried anchor blend comment comp enabled expressions inPoint index keepTransform label locked name opacity outPoint parent position props rotation scale shy startTime stretch threeD",
+    addCamera: "_retried anchor blend comment comp enabled expressions inPoint index keepTransform label locked name opacity options outPoint parent pointOfInterest position props rotation scale shy startTime stretch threeD",
+    addControl: "_retried comp items layer name type value",
+    addEffect: "_retried all comp effect expressions index layer layerType layers listParams match name selected values",
+    addFromItem: "_retried anchor blend comment comp duration enabled expressions inPoint index item keepTransform label locked name opacity outPoint parent position props rotation scale shy startTime stretch threeD",
+    addKeyframes: "_retried all clear comp keys layer layerType layers match path relativeTo selected",
+    addLight: "_retried anchor blend center comment comp enabled expressions inPoint index keepTransform label lightType locked name opacity options outPoint parent position props rotation scale shy startTime stretch threeD",
+    addMarker: "_retried chapter comment comp duration label layer markers time url",
+    addMask: "_retried all color comp ellipse expansion feather featherFalloff inverted layer layerType layers locked match mode motionBlur name opacity rect selected time vertices",
+    addNull: "_retried anchor blend comment comp duration enabled expressions inPoint index keepTransform label locked name opacity outPoint parent position props rotation scale shy startTime stretch threeD",
+    addProperty: "_retried all comp expressions index layer layerType layers match matchName name parent selected values",
+    addShape: "_retried absolute anchor blend comment comp enabled expressions inPoint index keepTransform label locked name opacity outPoint parent position props rotation scale shape shapes shy startTime stretch threeD",
+    addShapeGroup: "_retried comp layer parent shape",
+    addShapeItem: "_retried comp expressions index item layer name parent values",
+    addSolid: "_retried adjustment anchor blend color comment comp duration enabled expressions height inPoint index keepTransform label locked name opacity outPoint parent position props rotation scale shy startTime stretch threeD width",
+    addText: "_retried anchor blend box comment comp enabled expressions inPoint index inheritCharacterPanel keepTransform label locked name opacity outPoint parent position props rotation scale shy startTime stretch style text threeD",
+    addTextAnimator: "_retried comp layer name properties selector",
+    addToEssentialGraphics: "_retried comp egComp layer names path paths templateName",
+    addToRenderQueue: "* _retried comp file length outputTemplate overwrite range renderTemplate workArea",
+    align: "_retried all comp edge layer layerType layers match selected time to",
+    applyPreset: "_retried all comp file layer layerType layers match selected",
+    audioToKeyframes: "_retried all comp keep layer layerType layers match minGap selected silence",
+    audit: "_retried comp compMatch comps limit out safe",
+    backupProject: "_retried label save",
+    bakeExpression: "_retried comp keepExpression layer path range step",
+    batch: "_retried atomic commands diff diffLimit undoName",
+    cameraMove: "_retried amount comp ease frequency layer move range steps",
+    cameraOptions: "_retried comp layer values",
+    centerAnchor: "_retried all comp layer layerType layers match selected time where",
+    checkGlyphs: "_retried font text",
+    checkTextOverlap: "_retried comp ignore maxCover time times",
+    cleanupProject: "_retried action comps confirm",
+    clearRQ: "* _retried indexes length onlyDone",
+    compInfo: "_retried comp out",
+    copyEffects: "* _retried all comp effects layer layerType layers length match selected toComp toLayer toLayers toMatch",
+    copyLayerToComp: "* _retried all comp layer layerType layers length match selected toComp",
+    createComp: "_retried bgColor duration folder frameRate height ifExists name pixelAspect width",
+    createFolder: "_retried name",
+    deleteItem: "_retried force item items",
+    deleteLayer: "_retried all comp layer layerType layers match selected",
+    dependencyGraph: "_retried comp footage maxDepth out",
+    diff: "_retried limit name",
+    distribute: "_retried all axis by comp layer layerType layers match selected time",
+    dumpComp: "_retried all comp depth ease evaluated layer layerType layers match maxExpr out props selected time",
+    dumpLayer: "_retried all comp depth ease evaluated layer maxExpr out props time",
+    dumpProperty: "_retried all comp depth ease evaluated layer maxExpr path props time",
+    duplicateComp: "_retried comp deep dryRun folder name suffix",
+    duplicateLayer: "* _retried all comp count layer layerType layers match selected",
+    enableExpressions: "_retried all comp enabled layer layerType layers match path selected",
+    exportMogrt: "_retried comp file overwrite",
+    findLayers: "_retried comment comp compMatch comps disabled effect expression hasExpressions hasKeys layerType limit name out source text",
+    fitBox: "_retried color comp layer name opacity padding rigged roundness time",
+    fitToComp: "_retried all comp layer layerType layers match mode selected time",
+    getLog: "_retried lines",
+    getNotes: "_retried clear",
+    guides: "_retried add comp remove",
+    help: "_retried filter readOnly writeOnly",
+    importFile: "_retried as file files folder forceAlphabetical name sequence",
+    importProject: "_retried file folder",
+    interpretFootage: "_retried alphaMode conformFrameRate fieldSeparation invertAlpha item loop pixelAspect premulColor",
+    lightOptions: "_retried comp layer lightType values",
+    linkProperty: "_retried all comp layer layerType layers match path selected source template",
+    lintMotion: "_retried all comp cps layer layerType layers limit match selected",
+    listBackups: "_retried limit",
+    listEffects: "_retried match out",
+    listExpressions: "_retried comp compMatch comps errorsOnly full match out",
+    listFonts: "_retried available comp compMatch comps match out",
+    listGuides: "_retried comp",
+    listRQ: "_retried templates",
+    lookAt: "_retried all comp layer layerType layers live match selected target targetLayer",
+    markersFromFile: "_retried clear comp file layer offset",
+    materialOptions: "_retried all comp layer layerType layers match selected values",
+    menuCommand: "_retried all command comp confirm layer layerType layers match selected",
+    motionBlurSettings: "_retried adaptiveLimit all comp enabled layer layerMotionBlur layerType layers match samplesPerFrame selected shutterAngle shutterPhase",
+    moveKeyframes: "* _retried all comp delta indexes layer layerType layers length match path paths range selected selectedKeys times",
+    moveLayer: "_retried all comp layer layerType layers match selected to",
+    moveToFolder: "_retried create folder item items",
+    offsetValues: "* _retried all comp delta indexes layer layerType layers length match path range selected selectedKeys times",
+    openComp: "_retried comp time workArea",
+    pin: "_retried all comp edge layer layerType layers margin match safe selected time",
+    ping: "_retried",
+    placeAudioCues: "_retried comp cues dryRun folder",
+    precompose: "_retried all comp folder layer layerType layers match moveAllAttributes name selected",
+    projectTree: "_retried flat match out type",
+    purgeCache: "_retried target",
+    queueInAME: "_retried render",
+    removeEffect: "_retried all comp effect layer layerType layers match selected",
+    removeExpression: "_retried all comp layer layerType layers match path selected",
+    removeKeyframes: "* _retried all comp indexes keepValue layer layerType layers length match path paths range selected selectedKeys times",
+    removeMarker: "_retried all comp index layer match time",
+    removeMask: "_retried all comp layer layerType layers mask match selected",
+    removeProperty: "_retried all comp layer layerType layers match path selected",
+    renameLayer: "_retried all comp find layer layerType layers match name replace selected",
+    renameProperty: "_retried comp layer name path",
+    renderFrames: "_retried all comp folder isolate layer layerType layers markers match prefix range resolution selected step time times",
+    renderPreview: "_retried comp file half range workArea",
+    renderer3D: "_retried comp renderer",
+    reorderEffect: "_retried comp effect index layer",
+    reorderProperty: "_retried comp index layer path",
+    replaceFont: "_retried comp compMatch comps dryRun from regex to",
+    replaceFootage: "_retried file forceAlphabetical item sequence",
+    replaceInExpressions: "_retried comp compMatch comps dryRun find layerMatch matchCase regex replace",
+    replaceItemUsage: "_retried dryRun fixExpressions from to",
+    replaceSource: "_retried all comp fixExpressions item layer layerType layers match selected",
+    replaceText: "_retried comp compMatch comps dryRun find layerMatch matchCase regex replace",
+    resizeComp: "_retried anchor comp height width",
+    restoreBackup: "_retried confirm discardUnsaved file",
+    retimeByMap: "_retried comp compMatch comps dryRun extendComp map markers remapKeys trimOut",
+    reverseKeyframes: "* _retried all comp indexes layer layerType layers length match path paths range selected selectedKeys times",
+    saveProject: "_retried confirm",
+    selectLayers: "_retried add all comp layer layerType layers match open selected",
+    separateDimensions: "_retried all comp layer layerType layers match path selected separated",
+    sequenceLayers: "_retried all comp layer layerType layers match overlap reverse selected start",
+    setCharStyle: "_retried comp finds layer ranges time",
+    setComment: "_retried all append comment comp item layer layerType layers match selected",
+    setCompSettings: "_retried bgColor comment comp displayStartTime draft3D dropFrame duration frameBlending frameRate height hideShyLayers label motionBlur motionBlurAdaptiveSampleLimit motionBlurSamplesPerFrame motionGraphicsTemplateName name pixelAspect preserveNestedFrameRate preserveNestedResolution renderer resolutionFactor shutterAngle shutterPhase time width workArea",
+    setEnabled: "_retried all comp enabled layer layerType layers match path selected",
+    setExpression: "_retried all comp enabled expression layer layerType layers match path selected",
+    setGradient: "_retried comp end highlightAngle highlightLength layer opacity path start type",
+    setItem: "_retried comment item label name",
+    setKeyInterpolation: "* _retried all comp indexes layer layerType layers length match path paths range selected selectedKeys times",
+    setMarker: "* _retried all chapter comment comp duration index label layer length match newTime shift time url",
+    setMask: "* _retried comp layer mask newName",
+    setParent: "_retried all comp keepTransform layer layerType layers match parent selected",
+    setPathKeys: "_retried clear comp file fps keys layer path timeBase",
+    setPathVertices: "_retried comp layer path time",
+    setProperties: "_retried all comp items layer layerType layers match selected time values",
+    setProperty: "_retried all comp layer layerType layers match path selected time value",
+    setProxy: "_retried file item none sequence useProxy",
+    setSwitches: "_retried adjustment all audioEnabled autoOrient blend collapse comp effectsActive enabled frameBlending guide label layer layerType layers locked match motionBlur preserveTransparency quality samplingQuality selected shy solo threeD",
+    setText: "_retried all comp layer layerType layers match selected text time",
+    setTextBox: "_retried all comp layer layerType layers match position selected size",
+    setTextStyle: "_retried all comp layer layerType layers match selected style time",
+    setTiming: "_retried all comp duration inPoint layer layerType layers match outPoint selected shift startTime stretch",
+    setTrackMatte: "_retried all comp layer layerType layers match matte selected type",
+    shiftLayers: "_retried after all comp delta extendComp layer layerType layers markers match selected",
+    snapToPixel: "_retried all comp layer layerType layers match selected",
+    snapshot: "_retried comp compMatch comps name",
+    sourceRect: "_retried all comp extents layer layerType layers match selected time",
+    splitLayer: "_retried comp layer time",
+    stack: "_retried align all axis comp gap layer layerType layers match selected start time",
+    startRender: "_retried confirm",
+    textLayout: "_retried all comp full layer layerType layers match selected time",
+    timeRemap: "_retried all comp enable frameBlending freezeAt keys layer layerType layers match selected",
+    toggleEffect: "_retried all comp effect enabled layer layerType layers match selected",
+    trackerToNull: "_retried comp layer name trackPoint tracker",
+    trimToMarker: "_retried all comp inMarker layer layerMarkers layerType layers match outMarker selected useEnd",
+    valueAtTime: "_retried comp layer path preExpression time times",
+    whereUsed: "_retried item text",
+    zoomToRect: "_retried all comp ease fill layer layerType layers match name range rect selected target time"
+};
 // ================================================================ READ-ONLY COMMANDS
 
 def("ping", {}, "Bridge/AE/project status.", function (a) {
     var r = {
-        bridge: RB.VERSION, ae: app.version, project: app.project.file ? app.project.file.fsName : null,
+        bridge: RB.VERSION, ae: app.version, os: $.os, aeLanguage: app.isoLanguage,
+        project: app.project.file ? app.project.file.fsName : null,
         numItems: app.project.numItems, allowWrites: RB.allowWrites(), bridgeFolder: RB.root,
         allowedWriteRoots: allowedRoots(), time: stamp()
     };
     try { r.dirty = app.project.dirty; } catch (e) {}
+    // self-check of the unknown-argument warning (a sample with a typo must produce one warning)
+    try {
+        var w0 = RB.warnings.length, warned = checkArgs("addNull", { postion: 1 });
+        RB.warnings.length = w0;
+        r.argsCheck = { table: !!RB.ARGS, commands: RB.ARGS ? keysOf(RB.ARGS).length : 0, warned: warned };
+    } catch (e) { r.argsCheck = "error: " + errStr(e); }
     try { if (app.project.activeItem) r.activeItem = iref(app.project.activeItem); } catch (e) {}
     return r;
 });
@@ -1213,7 +1491,9 @@ def("help", {}, "List commands. args: [filter] regex on name/doc, [writeOnly], [
         if (re && !re.test(names[i]) && !re.test(c.doc)) continue;
         if (a.writeOnly && !c.w) continue;
         if (a.readOnly && c.w) continue;
-        r.push({ name: names[i], write: c.w, doc: c.doc });
+        var o = { name: names[i], write: !!c.w, doc: c.doc };
+        if (c.w && (c.noUndo || c.irreversible)) o.undoable = false; // Cmd+Z cannot take it back (save, render, menu, cleanup...)
+        r.push(o);
     }
     return { count: r.length, commands: r };
 });
@@ -1420,7 +1700,7 @@ def("listEffects", {}, "Installed effects. args: [match] regex on name/matchName
     return outResult(a, { count: r.length, effects: r });
 });
 
-def("renderFrames", {}, "Save comp frames as PNG. args: comp, [time]|[times]|[range:[start,end], step]|[markers:true], [folder] (default bridge/renders), [prefix]", function (a) {
+def("renderFrames", {}, "Save comp frames as PNG. Times outside the comp are clamped to its first/last frame. args: comp, [time]|[times]|[range:[start,end], step]|[markers:true], [folder] (default bridge/renders), [prefix], [isolate] layer(s) to render alone (solo, restored after; needs Allow changes), [resolution] 1|2|3|4 = full/half/third/quarter (restored after; needs Allow changes). The client (aeb.py) waits until every PNG is complete and flags empty / identical frames.", function (a) {
     var c = getComp(a.comp), times = [], i;
     if (a.times) times = a.times;
     else if (a.markers) { var mk = c.markerProperty; for (i = 1; i <= mk.numKeys; i++) times.push(mk.keyTime(i)); }
@@ -1429,15 +1709,50 @@ def("renderFrames", {}, "Save comp frames as PNG. args: comp, [time]|[times]|[ra
     if (times.length > 200) fail("Too many frames (" + times.length + "), max 200");
     var folder = safeOut((a.folder || "renders") + "/x.png");
     folder = new File(folder).parent.fsName;
-    var out = [];
-    for (i = 0; i < times.length; i++) {
-        var tt = parseTime(times[i], c.frameRate);
-        var name = (a.prefix || safeName(c.name)) + "_" + pad(Math.round(tt * 1000), 6) + "ms.png";
-        var f = new File(folder + "/" + name);
-        c.saveFrameToPng(tt, f);
-        out.push({ time: rnd(tt), file: f.fsName });
+    var iso = a.isolate !== undefined && a.isolate !== null, res = num(a.resolution, 1);
+    if ((iso || res !== 1) && !RB.allowWrites()) fail("isolate / resolution change the comp for the capture (restored after) and need 'Allow changes'");
+    if (res !== 1 && (res < 1 || res > 4 || Math.round(res) !== res)) fail("resolution must be 1, 2, 3 or 4");
+    var solos = [], keepRes = c.resolutionFactor, out = [], clamped = 0, last = c.duration - c.frameDuration;
+    if (iso || res !== 1) app.beginUndoGroup("BridgeLine: renderFrames (temporary)");
+    try {
+        if (iso) {
+            var keep = getLayers(c, { layers: isArr(a.isolate) ? a.isolate : [a.isolate] }), ids = {};
+            for (i = 0; i < keep.length; i++) ids[keep[i].id] = 1;
+            for (i = 1; i <= c.numLayers; i++) {
+                var l = c.layer(i);
+                solos.push([l, l.solo]);
+                var want = !!ids[l.id];
+                if (l.solo !== want) withUnlocked(l, function (x) { try { x.solo = want; } catch (e) {} });
+            }
+        }
+        if (res !== 1) c.resolutionFactor = [res, res];
+        for (i = 0; i < times.length; i++) {
+            var tt = parseTime(times[i], c.frameRate);
+            if (tt > last) { tt = last; clamped++; } else if (tt < 0) { tt = 0; clamped++; }
+            var name = (a.prefix || safeName(c.name)) + "_" + pad(Math.round(tt * 1000), 6) + "ms.png";
+            var f = new File(folder + "/" + name);
+            c.saveFrameToPng(tt, f);
+            out.push({ time: rnd(tt), file: f.fsName });
+        }
+    } finally {
+        for (i = 0; i < solos.length; i++) { var sl = solos[i]; if (sl[0].solo !== sl[1]) withUnlocked(sl[0], function (x) { try { x.solo = sl[1]; } catch (e) {} }); }
+        if (res !== 1) try { c.resolutionFactor = keepRes; } catch (e) {}
+        if (iso || res !== 1) app.endUndoGroup();
     }
-    return { count: out.length, frames: out };
+    if (clamped) warn(clamped + " time(s) outside the comp were clamped to its first/last frame (" + rnd(last) + " s)");
+    var r = { count: out.length, frames: out };
+    // colour management: with OCIO the PNGs are written in the working space and look darker / flatter than the viewer
+    try {
+        var cms = app.project.colorManagementSystem;
+        if (cms !== undefined) {
+            r.colorManagement = (cms === 1) ? "OCIO" : "Adobe";
+            try { r.workingSpace = app.project.workingSpace; } catch (e3) {}
+            if (cms === 1) warn("Project uses OCIO colour management: PNGs are in the working space and can look darker than the viewer. Judge layout and timing, not colour.");
+        }
+    } catch (e4) {}
+    if (res !== 1) r.resolution = "1/" + res;
+    if (iso) r.isolated = a.isolate;
+    return r;
 });
 
 def("valueAtTime", {}, "Evaluated value(s). args: comp, layer, path, [time]|[times], [preExpression]", function (a) {
@@ -1579,6 +1894,24 @@ function flattenDump(d, map) {
         if (l.props) props(lp, l.props);
     }
 }
+// full dump of a comp in the snapshot format (comp settings + every layer with keys and eases)
+function compFull(c) {
+    var r = compOut(c), o = dumpOpts({ ease: true }, c);
+    r.layers = [];
+    for (var j = 1; j <= c.numLayers; j++) r.layers.push(layerOut(c.layer(j), o));
+    return r;
+}
+function flatDiff(before, after, limit) {
+    var changed = [], added = [], removed = [], k;
+    for (k in before) {
+        if (!has(before, k)) continue;
+        if (!has(after, k)) removed.push(k);
+        else if (after[k] !== before[k]) changed.push({ key: k, before: shorten(before[k], 400), after: shorten(after[k], 400) });
+    }
+    for (k in after) if (has(after, k) && !has(before, k)) added.push(k + " = " + shorten(after[k], 200));
+    return { changedCount: changed.length, addedCount: added.length, removedCount: removed.length,
+             changed: changed.slice(0, limit), added: added.slice(0, limit), removed: removed.slice(0, limit) };
+}
 def("snapshot", {}, "Save a JSON snapshot of comps for later diff. args: [comps|comp|compMatch], [name] (default: first comp name)", function (a) {
     var comps = getComps(a, false), dumps = [];
     for (var i = 0; i < comps.length; i++) {
@@ -1600,35 +1933,30 @@ def("diff", {}, "Compare current state with a snapshot. args: name, [limit=300]"
         flattenDump(snap.comps[i], before);
         var c = null;
         try { c = getComp(snap.comps[i].id); } catch (e) {}
-        if (c) {
-            var r = compOut(c), o = dumpOpts({ ease: true }, c);
-            r.layers = [];
-            for (var j = 1; j <= c.numLayers; j++) r.layers.push(layerOut(c.layer(j), o));
-            flattenDump(r, after);
-        }
+        if (c) flattenDump(compFull(c), after);
     }
-    var changed = [], added = [], removed = [], limit = num(a.limit, 300), k;
-    for (k in before) {
-        if (!has(before, k)) continue;
-        if (!has(after, k)) removed.push(k);
-        else if (after[k] !== before[k]) changed.push({ key: k, before: shorten(before[k], 400), after: shorten(after[k], 400) });
-    }
-    for (k in after) if (has(after, k) && !has(before, k)) added.push(k + " = " + shorten(after[k], 200));
-    return {
-        snapshot: snap.created, changedCount: changed.length, addedCount: added.length, removedCount: removed.length,
-        changed: changed.slice(0, limit), added: added.slice(0, limit), removed: removed.slice(0, limit)
-    };
+    var d = flatDiff(before, after, num(a.limit, 300));
+    d.snapshot = snap.created;
+    return d;
 });
 
 // ---------------------------------------------------------------- audit
-def("audit", {}, "Project problems report: missing footage/fonts, expression errors, texts outside frame/safe area, empty comps, unused items, layers outside comp time, missing effects. args: [comps|compMatch], [safe=0.9] title-safe ratio, [limit=100]", function (a) {
+def("audit", {}, "Project problems report: missing footage/fonts (also files deleted from disk after import), fonts without glyphs for the layer's text (AE 25.1+), box text that overflows (AE 24.6+), expression errors, disabled expressions (AE disables one that errors), texts outside frame/safe area, empty comps, unused items, layers outside comp time, missing effects. args: [comps|compMatch], [safe=0.9] title-safe ratio, [limit=100]", function (a) {
     var limit = num(a.limit, 100), safe = num(a.safe, 0.9), comps = getComps(a, true), i, j;
-    var r = { missingFootage: [], unusedItems: [], emptyComps: [], expressionErrors: [], textOutsideFrame: [], textOutsideSafe: [], layersOutsideCompTime: [], missingEffects: [] };
+    var r = { missingFootage: [], unusedItems: [], emptyComps: [], expressionErrors: [], disabledExpressions: [], missingGlyphs: [], textOverflow: [], textOutsideFrame: [], textOutsideSafe: [], layersOutsideCompTime: [], missingEffects: [] };
     function push(list, v) { if (list.length < limit) list.push(v); }
     for (i = 1; i <= app.project.numItems; i++) {
         var it = app.project.item(i);
         if (it instanceof FootageItem) {
             if (it.footageMissing) push(r.missingFootage, iref(it));
+            else {
+                // footageMissing stays false for a file deleted after import until the project is reopened
+                try {
+                    if (it.mainSource instanceof FileSource && it.file && !it.file.exists) {
+                        var mf = iref(it); mf.reason = "file not on disk: " + it.file.fsName; push(r.missingFootage, mf);
+                    }
+                } catch (e) {}
+            }
             if (!it.usedIn.length) push(r.unusedItems, iref(it));
         }
     }
@@ -1648,9 +1976,21 @@ def("audit", {}, "Project problems report: missing footage/fonts, expression err
                     if (p.canSetExpression && p.expression !== "" && p.expressionEnabled) {
                         var err = exprEval(p);
                         if (err) push(r.expressionErrors, { where: where, path: propPath(p), error: err });
+                    } else if (p.canSetExpression && p.expression !== "" && !p.expressionEnabled) {
+                        var de = { where: where, path: propPath(p) };
+                        try { if (p.expressionError) de.error = p.expressionError; } catch (e2) {}
+                        push(r.disabledExpressions, de);
                     }
                 } catch (e) {}
             });
+            if (l instanceof TextLayer) {
+                // fonts that cannot show the layer's characters (Cyrillic in a Latin-only font...), AE 25.1+
+                try {
+                    var td = textProp(l).value, mg = missingGlyphs(td.font, td.text);
+                    if (mg.length) push(r.missingGlyphs, { where: where, font: td.font, missing: mg.join("") });
+                    if (td.boxText && td.boxOverflow) push(r.textOverflow, { where: where, box: rnd(td.boxTextSize) });
+                } catch (e) {}
+            }
             if (l instanceof TextLayer && l.enabled) {
                 var t = Math.max(l.inPoint, Math.min(c.duration, l.outPoint) - c.frameDuration);
                 t = Math.max(0, Math.min(t, (l.inPoint + Math.min(l.outPoint, c.duration)) / 2));
@@ -1668,6 +2008,49 @@ def("audit", {}, "Project problems report: missing footage/fonts, expression err
     } catch (e) { r.missingFonts = "not available in this AE version"; }
     r.note = "Bounds are approximate (2D transforms incl. parents; 3D, auto-orient and effects are ignored).";
     return outResult(a, r);
+});
+
+def("lintMotion", {}, "Motion checks a reviewer would make, each with a time to look at (read-only): keys between frames, one-frame jumps without motion blur, linear transform keys, text on screen shorter than its reading time, rotation turning more than 180 deg between keys, solo left on, comp not at full resolution / Draft 3D. args: comp, [layers|match], [cps=15] reading speed chars/s, [limit=100]", function (a) {
+    var c = getComp(a.comp), ls = (a.layer || a.layers || a.match) ? getLayers(c, a) : null, fd = c.frameDuration, out = [];
+    var limit = num(a.limit, 100), cps = num(a.cps, 15), i, k;
+    function add(sev, check, l, t, detail) { if (out.length < limit) out.push({ severity: sev, check: check, layer: l ? l.name : null, time: t === null ? null : rnd(t), detail: detail }); }
+    if (!ls) { ls = []; for (i = 1; i <= c.numLayers; i++) ls.push(c.layer(i)); }
+    try { if (c.resolutionFactor[0] !== 1 || c.resolutionFactor[1] !== 1) add("warn", "resolution", null, null, "comp resolution is 1/" + c.resolutionFactor[0] + " (renders and previews are softer)"); } catch (e) {}
+    try { if (c.draft3d) add("warn", "draft3d", null, null, "Draft 3D is on"); } catch (e) {}
+    for (i = 0; i < ls.length; i++) {
+        var l = ls[i];
+        if (l.solo) add("warn", "solo", l, null, "solo is on - other layers are hidden in renders");
+        var mb = false; try { mb = l.motionBlur && c.motionBlur; } catch (e) {}
+        if (l instanceof TextLayer && l.enabled) {
+            try {
+                var txt = String(textProp(l).value.text).replace(/\s+/g, " "), need = txt.length / cps, vis = Math.min(l.outPoint, c.duration) - Math.max(l.inPoint, 0);
+                if (txt.length > 3 && vis > 0 && vis < need) add("warn", "readingTime", l, Math.max(l.inPoint, 0), "on screen " + rnd(vis) + " s, reading needs ~" + rnd(need) + " s (" + txt.length + " chars at " + cps + "/s)");
+            } catch (e) {}
+        }
+        walkProps(l, function (p) {
+            try {
+                if (!p.numKeys) return;
+                var tr = propPath(p).indexOf("Transform/") === 0, linear = 0;
+                for (k = 1; k <= p.numKeys; k++) {
+                    var t = p.keyTime(k), fr = t / fd;
+                    if (Math.abs(fr - Math.round(fr)) > 0.01) add("info", "subframeKey", l, t, propPath(p) + " key " + k + " is between frames");
+                    if (k > 1) {
+                        var dt = t - p.keyTime(k - 1), v0 = p.keyValue(k - 1), v1 = p.keyValue(k);
+                        if (dt <= fd * 1.01 && !mb && p.propertyValueType !== PropertyValueType.TEXT_DOCUMENT && p.propertyValueType !== PropertyValueType.SHAPE) {
+                            var big = isArr(v1) ? Math.abs(v1[0] - v0[0]) + Math.abs(v1[1] - v0[1]) > 50 : Math.abs(v1 - v0) > (/Opacity/.test(p.name) ? 50 : 30);
+                            if (big) add("info", "oneFrameJump", l, t, propPath(p) + " jumps in one frame without motion blur");
+                        }
+                        if (/Rotation/.test(p.name) && typeof v1 === "number" && Math.abs(v1 - v0) > 180) add("info", "longRotation", l, t, propPath(p) + " turns " + rnd(Math.abs(v1 - v0)) + " deg between keys");
+                    }
+                    if (tr && p.keyInInterpolationType(k) === KeyframeInterpolationType.LINEAR && p.keyOutInterpolationType(k) === KeyframeInterpolationType.LINEAR && k > 1 && k < p.numKeys) linear++;
+                }
+                if (tr && linear) add("info", "linearKeys", l, p.keyTime(2), propPath(p) + ": " + linear + " inner key(s) linear - motion may look mechanical");
+            } catch (e) {}
+        });
+    }
+    var counts = {};
+    for (i = 0; i < out.length; i++) counts[out[i].check] = (counts[out[i].check] || 0) + 1;
+    return { comp: c.name, findings: out.length, byCheck: counts, items: out };
 });
 
 def("checkTextOverlap", {}, "Text layers whose bounding box overlaps other visible layers. args: comp, [time]|[times], [ignore] regex of layer names, [maxCover=0.9] ignore layers covering more than this share of frame", function (a) {
@@ -1766,13 +2149,19 @@ def("addAdjustment", { w: 1 }, "Add adjustment layer. args: comp + common", func
     return created(c, l);
 });
 
-def("addText", { w: 1 }, "Add text. args: comp, text (string or lines[]), [box:[w,h]], [style:{font,fontSize,fillColor,justification,tracking,leading,...}] + common", function (a) {
+def("addText", { w: 1 }, "Add text. Starts with neutral tracking/scale/baseline/faux (not the Character panel's) unless inheritCharacterPanel:true. style.font may be a PostScript name, 'Family Style' or 'Family'. args: comp, text (string or lines[]), [box:[w,h]], [style:{font,fontSize,fillColor,justification,tracking,leading,...}], [inheritCharacterPanel] + common", function (a) {
     var c = getComp(a.comp), txt = isArr(a.text) ? a.text.join("\r") : String(a.text === undefined ? "Text" : a.text);
     var l = a.box ? c.layers.addBoxText(a.box, txt) : c.layers.addText(txt);
-    if (a.style) {
+    // a new text layer takes tracking, scale, baseline shift and faux styles from the Character panel; start neutral
+    // unless asked otherwise (inheritCharacterPanel:true keeps the panel's settings)
+    var st = {}, k, neutral = { tracking: 0, baselineShift: 0, horizontalScale: 100, verticalScale: 100, fauxBold: false, fauxItalic: false };
+    if (a.inheritCharacterPanel !== true) for (k in neutral) if (has(neutral, k)) st[k] = neutral[k];
+    if (a.style) for (k in a.style) if (has(a.style, k)) st[k] = a.style[k];
+    if (keysOf(st).length) {
         var p = l.property("ADBE Text Properties").property("ADBE Text Document"), d = p.value;
-        styleApply(d, a.style);
+        styleApply(d, st);
         p.setValue(d);
+        checkJustification(l, d.justification, function () { return p.value; }, function (x) { p.setValue(x); });
     }
     applyLayerCommon(c, l, a);
     return created(c, l);
@@ -1943,6 +2332,15 @@ def("copyLayerToComp", { w: 1 }, "Copy layer(s) to another comp (goes on top the
         r.push(created(dest, nl));
     }
     return r;
+});
+
+def("splitLayer", { w: 1 }, "Cut a layer at a time into two (like Edit > Split Layer): the original ends there, a duplicate starts there. args: comp, layer, time", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer), t = parseTime(a.time, c.frameRate);
+    if (t <= l.inPoint + 1e-6 || t >= l.outPoint - 1e-6) fail("time " + rnd(t) + " is not inside the layer (" + rnd(l.inPoint) + " - " + rnd(l.outPoint) + ")");
+    var d;
+    withUnlocked(l, function (x) { d = x.duplicate(); x.outPoint = t; });
+    withUnlocked(d, function (x) { x.inPoint = t; });
+    return { first: lref(l), second: lref(d), at: rnd(t) };
 });
 
 def("setTiming", { w: 1 }, "Timing. args: comp, layer(s), [startTime], [inPoint], [outPoint], [duration] (out = in + duration), [shift] delta for startTime, [stretch]", function (a) {
@@ -2214,18 +2612,67 @@ function keyedProps(l, a) {
     return all;
 }
 
-def("removeKeyframes", { w: 1 }, "Remove keys. args: comp, layer(s), [path|paths] (default: all keyed props), and [times]|[range:[t0,t1]]|[indexes]|[selectedKeys]|[all] (default all)", function (a) {
+def("removeKeyframes", { w: 1 }, "Remove keys. args: comp, layer(s), [path|paths] (default: all keyed props), and [times]|[range:[t0,t1]]|[indexes]|[selectedKeys]|[all] (default all), [keepValue] when the last key goes: 'first'|'last'|'current' (AE default: the value under the time indicator)|a value", function (a) {
     var c = getComp(a.comp), ls = getLayers(c, a), n = 0;
     for (var i = 0; i < ls.length; i++) {
         var ps = keyedProps(ls[i], a);
         withUnlocked(ls[i], function () {
             for (var j = 0; j < ps.length; j++) {
-                var ids = keySelector(ps[j], a, c);
-                for (var k = ids.length - 1; k >= 0; k--) { ps[j].removeKey(ids[k]); n++; }
+                var p = ps[j], ids = keySelector(p, a, c), keep = undefined;   // ES3: var does not reset per iteration
+                if (a.keepValue !== undefined && ids.length === p.numKeys && p.numKeys) {
+                    if (a.keepValue === "first") keep = p.keyValue(1);
+                    else if (a.keepValue === "last") keep = p.keyValue(p.numKeys);
+                    else if (a.keepValue !== "current") keep = valIn(p, a.keepValue);
+                }
+                for (var k = ids.length - 1; k >= 0; k--) { p.removeKey(ids[k]); n++; }
+                if (keep !== undefined && p.numKeys === 0) p.setValue(keep);
             }
         });
     }
     return { removed: n };
+});
+
+def("offsetValues", { w: 1 }, "Add a delta to a property's value - to every selected key (timing and easing stay) or to the static value. 'Move it 40 px up' = delta [0,-40] on position. args: comp, layer(s)|match|selected, path, delta (number or array), and key filter [times]|[range]|[indexes]|[selectedKeys] (default all keys)", function (a) {
+    var c = getComp(a.comp), ls = getLayers(c, a), out = [];
+    if (a.delta === undefined) fail("delta is required");
+    function add(v, d) {
+        if (isArr(v)) { var r = v.slice(0); for (var i = 0; i < r.length; i++) r[i] += isArr(d) ? (d[i] || 0) : d; return r; }
+        return v + (isArr(d) ? d[0] : d);
+    }
+    for (var i = 0; i < ls.length; i++) {
+        var p = resolveProp(ls[i], a.path), n = 0;
+        if (typeof p.value !== "number" && !isArr(p.value)) fail("offsetValues works on numbers and arrays, not on " + propPath(p));
+        withUnlocked(ls[i], function () {
+            if (p.numKeys) { var ids = keySelector(p, a, c); for (var k = 0; k < ids.length; k++) { p.setValueAtKey(ids[k], add(p.keyValue(ids[k]), a.delta)); n++; } }
+            else { p.setValue(add(p.value, a.delta)); n = 1; }
+        });
+        out.push({ layer: lref(ls[i]), path: propPath(p), changed: n, keyed: p.numKeys > 0 });
+    }
+    return out;
+});
+
+def("reverseKeyframes", { w: 1 }, "Reverse keys in time (mirror inside their span, easing and spatial tangents swapped). args: comp, layer(s), [path|paths] (default all keyed props), key filter [range]|[times]|[indexes]|[selectedKeys] (default all)", function (a) {
+    var c = getComp(a.comp), ls = getLayers(c, a), n = 0;
+    for (var i = 0; i < ls.length; i++) {
+        var ps = keyedProps(ls[i], a);
+        withUnlocked(ls[i], function () {
+            for (var j = 0; j < ps.length; j++) {
+                var p = ps[j], ids = keySelector(p, a, c), caps = [], k;
+                if (ids.length < 2) continue;
+                for (k = 0; k < ids.length; k++) caps.push(keyCapture(p, ids[k]));
+                var t0 = caps[0].t, t1 = caps[caps.length - 1].t;
+                for (k = ids.length - 1; k >= 0; k--) p.removeKey(ids[k]);
+                for (k = 0; k < caps.length; k++) {
+                    var cp = caps[k], sw = {};
+                    for (var f in cp) if (has(cp, f)) sw[f] = cp[f];
+                    sw.ei = cp.eo; sw.eo = cp.ei; sw.ii = cp.oi; sw.oi = cp.ii; sw.sti = cp.sto; sw.sto = cp.sti;
+                    keyRestore(p, sw, t0 + t1 - cp.t);
+                }
+                n += caps.length;
+            }
+        });
+    }
+    return { reversed: n };
 });
 
 def("moveKeyframes", { w: 1 }, "Move keys in time. args: comp, layer(s), [path|paths] (default all keyed props), delta seconds, and optional key filter [range]|[times]|[indexes]|[selectedKeys]", function (a) {
@@ -2324,12 +2771,29 @@ def("bakeExpression", { w: 1 }, "Convert expression to keys. args: comp, layer, 
     var t0 = a.range ? a.range[0] : Math.max(0, l.inPoint), t1 = a.range ? a.range[1] : Math.min(c.duration, l.outPoint);
     var step = c.frameDuration * num(a.step, 1), times = [], vals = [];
     for (var t = t0; t <= t1 + 1e-6; t += step) { times.push(t); vals.push(p.valueAtTime(t, false)); }
+    var mode = "setValuesAtTimes";
     withUnlocked(l, function () {
-        if (a.keepExpression === false) p.expression = ""; else p.expressionEnabled = false;
-        for (var k = p.numKeys; k >= 1; k--) p.removeKey(k);
-        p.setValuesAtTimes(times, vals);
+        var oldTimes = [], k, i;
+        for (k = 1; k <= p.numKeys; k++) oldTimes.push(p.keyTime(k));
+        var expr = p.expression;
+        p.expressionEnabled = false;
+        // write the new keys first; only then remove the old ones (setValuesAtTimes is not supported on every
+        // property type - e.g. paths in some AE versions - and must not leave the property without keys)
+        try { p.setValuesAtTimes(times, vals); }
+        catch (e1) {
+            mode = "setValueAtTime";
+            try { for (i = 0; i < times.length; i++) p.setValueAtTime(times[i], vals[i]); }
+            catch (e2) { p.expression = expr; p.expressionEnabled = true; fail("Cannot write keys on " + propPath(p) + ": " + errStr(e2) + ". Nothing was changed."); }
+        }
+        var tol = c.frameDuration / 4;
+        for (k = p.numKeys; k >= 1; k--) {
+            var kt = p.keyTime(k), isNew = false;
+            for (i = 0; i < times.length && !isNew; i++) if (Math.abs(times[i] - kt) < tol) isNew = true;
+            if (!isNew) p.removeKey(k);
+        }
+        if (a.keepExpression === false) p.expression = "";
     });
-    return { path: propPath(p), keys: times.length };
+    return { path: propPath(p), keys: p.numKeys, written: times.length, mode: mode };
 });
 
 def("addProperty", { w: 1 }, "Generic: add a property/group into an indexed group (effect, mask, shape item, text animator, selector, layer style...). args: comp, layer(s), parent path (e.g. 'effects', 'contents', 'contents/Group 1/Contents'), matchName, [name], [values:{childPath:value}], [expressions:{childPath:expr}], [index]", function (a) {
@@ -2409,10 +2873,12 @@ def("addControl", { w: 1 }, "Expression control effect. args: comp, layer, type 
     var r;
     withUnlocked(l, function () {
         var fx = l.property("ADBE Effect Parade"), e = fx.addProperty(mn), ix = e.propertyIndex;
-        if (a.name) e.name = a.name;
-        if (a.type === "dropdown" && a.items) {
+        // Dropdown: setPropertyParameters rebuilds the effect and drops a custom name (AE 26+), so set the
+        // items first, fetch the effect again by index, and only then name it.
+        if (String(a.type).toLowerCase() === "dropdown" && a.items) {
             fx.property(ix).property(1).setPropertyParameters(a.items);
         }
+        if (a.name) fx.property(ix).name = a.name;
         if (a.value !== undefined) setPropValue(fx.property(ix).property(1), a.value);
         var ef = fx.property(ix);
         r = { layer: lref(l), effect: ef.name, path: propPath(ef.property(1)), expressionRef: exprRef(c, l, ef.property(1)) };
@@ -2457,8 +2923,11 @@ def("timeRemap", { w: 1 }, "Time remapping. args: comp, layer(s), [enable=true],
         withUnlocked(l, function () {
             if (a.enable === false) { l.timeRemapEnabled = false; return; }
             if (!l.canSetTimeRemapEnabled) fail("Time remap not possible on " + l.name);
+            var wasOn = l.timeRemapEnabled, io = [l.inPoint, l.outPoint];
             l.timeRemapEnabled = true;
-            var p = l.property("ADBE Time Remapping"), keep = [], j, k;
+            // enabling Time Remap resets the out point to the end of the source: put the layer's in/out back (out first)
+            if (!wasOn) { try { l.outPoint = io[1]; l.inPoint = io[0]; } catch (eo) { warn("in/out of " + l.name + " not restored: " + errStr(eo)); } }
+            var p = l.property("ADBE Time Remapping") || l.timeRemap, keep = [], j, k;   // audio layers: only the shortcut works
             var newKeys = a.keys || (a.freezeAt !== undefined ? [{ t: l.inPoint, v: a.freezeAt, interp: "hold" }] : []);
             if (newKeys.length) {
                 // AE does not allow an empty Time Remap: add new keys first, then remove the old ones
@@ -2516,7 +2985,7 @@ function getEffect(l, ref) {
     var fx = l.property("ADBE Effect Parade");
     if (typeof ref === "number") { if (ref < 1 || ref > fx.numProperties) fail("Effect index out of range on " + l.name); return fx.property(ref); }
     var e = childByKey(fx, ref);
-    if (!e) fail("Effect '" + ref + "' not found on " + l.name + ". Effects: " + childNames(fx));
+    if (!e) fail("Effect '" + ref + "' not found on '" + l.name + "'. Effects: " + childNames(fx));
     return e;
 }
 
@@ -2526,7 +2995,7 @@ def("addEffect", { w: 1 }, "Add effect. args: comp, layer(s)|match, effect (matc
         var l = ls[i];
         withUnlocked(l, function () {
             var fx = l.property("ADBE Effect Parade");
-            if (!fx.canAddProperty(mn)) fail("Effect cannot be added to " + l.name + ": " + mn);
+            if (!fx.canAddProperty(mn)) fail("Effect cannot be added to '" + l.name + "': " + mn);
             var e = fx.addProperty(mn), ix = e.propertyIndex, k;
             if (a.name) e.name = a.name;
             if (a.index !== undefined) { e.moveTo(a.index); ix = a.index; }
@@ -2694,13 +3163,29 @@ function textProp(l) {
     if (!(l instanceof TextLayer)) fail("Not a text layer: " + l.name);
     return l.property("ADBE Text Properties").property("ADBE Text Document");
 }
+// A TextDocument round trip can land a different justification than the one written (measured on AE 26.3 by
+// Engine-Room-Games/after-effects-mcp: LEFT came back CENTER, CENTER stored as RIGHT). Read it back and write it once more.
+function checkJustification(l, want, read, write) {
+    var got; try { got = read().justification; } catch (e) { return; }
+    if (want === undefined || got === want) return;
+    try { var d = read(); d.justification = want; write(d); got = read().justification; } catch (e2) {}
+    if (got !== want) warn("Justification of '" + l.name + "' is " + enumName("ParagraphJustification", got) + ", expected " + enumName("ParagraphJustification", want));
+}
 function editDoc(l, time, fn) {
     var p = textProp(l);
     withUnlocked(l, function () {
-        if (time !== undefined) { var d = p.valueAtTime(time, true); fn(d); p.setValueAtTime(time, d); }
-        else if (p.numKeys > 0) {
-            for (var k = 1; k <= p.numKeys; k++) { var dk = p.keyValue(k); fn(dk); p.setValueAtKey(k, dk); }
-        } else { var d2 = p.value; fn(d2); p.setValue(d2); }
+        if (time !== undefined) {
+            var d = p.valueAtTime(time, true); fn(d); p.setValueAtTime(time, d);
+            checkJustification(l, d.justification, function () { return p.valueAtTime(time, true); }, function (x) { p.setValueAtTime(time, x); });
+        } else if (p.numKeys > 0) {
+            for (var k = 1; k <= p.numKeys; k++) {
+                var dk = p.keyValue(k); fn(dk); p.setValueAtKey(k, dk);
+                (function (kk, want) { checkJustification(l, want, function () { return p.keyValue(kk); }, function (x) { p.setValueAtKey(kk, x); }); })(k, dk.justification);
+            }
+        } else {
+            var d2 = p.value; fn(d2); p.setValue(d2);
+            checkJustification(l, d2.justification, function () { return p.value; }, function (x) { p.setValue(x); });
+        }
     });
 }
 
@@ -2812,8 +3297,84 @@ def("replaceText", { w: 1 }, "Find/replace in text layers project-wide, keeping 
     return { dryRun: !!a.dryRun, count: res.length, changed: res };
 });
 
-def("replaceFont", { w: 1 }, "Replace font project-wide, including per-character runs. args: from (PostScript name or regex), to (PostScript name), [regex], [comps|compMatch], [dryRun]", function (a) {
+def("textLayout", {}, "How text composes: lines, overflow, wrapping, font coverage - without rendering. args: comp, [layer(s)|match] (default all text layers), [time], [full] untruncated text. Per layer: text, font, size, boxText, boxSize, lines (composed), paragraphs, rewrapped (AE broke a line), overflow (box text that does not fit, AE 24.6+), missingGlyphs (AE 25.1+), bounds", function (a) {
+    var c = getComp(a.comp), ls = (a.layer || a.layers || a.match) ? getLayers(c, a) : getLayers(c, { layerType: "text" }), out = [];
+    for (var i = 0; i < ls.length; i++) {
+        var l = ls[i];
+        if (!(l instanceof TextLayer)) continue;
+        var p = textProp(l), d = a.time !== undefined ? p.valueAtTime(parseTime(a.time, c.frameRate), false) : p.value;
+        var o = { layer: lref(l), text: a.full ? String(d.text) : shorten(d.text, 300), font: d.font, fontSize: rnd(d.fontSize), boxText: !!d.boxText };
+        var paras = String(d.text).split(/\r\n|\r|\n/).length;
+        o.paragraphs = paras;
+        try { o.lines = d.composedLineCount; } catch (e) {}
+        if (o.lines === undefined) { try { o.lines = d.baselineLocs.length / 2; } catch (e) {} }
+        if (o.lines !== undefined) o.rewrapped = o.lines > paras;
+        if (d.boxText) {
+            try { o.boxSize = rnd(d.boxTextSize); } catch (e) {}
+            try { o.overflow = !!d.boxOverflow; } catch (e) {}
+            if (o.lines === 0 && String(d.text).length) o.overflow = true;
+        }
+        var miss = missingGlyphs(d.font, d.text);
+        if (miss.length) o.missingGlyphs = miss.join("");
+        try { o.bounds = compBounds(l, a.time !== undefined ? parseTime(a.time, c.frameRate) : c.time); } catch (e) {}
+        out.push(o);
+    }
+    var bad = [];
+    for (i = 0; i < out.length; i++) if (out[i].overflow || out[i].missingGlyphs) bad.push(out[i].layer.name);
+    return { count: out.length, problems: bad, layers: out };
+});
+
+def("fitBox", { w: 1 }, "A plate (shape rectangle) behind a text layer that fits the text plus padding. It is parented to the text and placed below it; rigged:true (default) keeps fitting when the text changes (sourceRectAtTime expressions by layer name, with the static size as fallback). args: comp, layer (text), [name] (default '<layer> plate'), [padding] number or [x,y] (20), [roundness] (0), [color] ('#000000'), [opacity] (100), [rigged=true], [time]", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer);
+    if (!(l instanceof TextLayer)) fail("fitBox needs a text layer: '" + l.name + "'");
+    var pad = isArr(a.padding) ? a.padding : [num(a.padding, 20), num(a.padding, 20)];
+    var t = a.time !== undefined ? parseTime(a.time, c.frameRate) : Math.max(l.inPoint, Math.min(c.time, l.outPoint - c.frameDuration));
+    var r = l.sourceRectAtTime(t, false), w = r.width + 2 * pad[0], h = r.height + 2 * pad[1];
+    var sl = c.layers.addShape();
+    sl.name = a.name || (l.name + " plate");
+    sl.moveAfter(l);
+    sl.inPoint = l.inPoint; sl.outPoint = l.outPoint;
+    try { if (l.threeDLayer) sl.threeDLayer = true; } catch (e) {}
+    var g = sl.property("ADBE Root Vectors Group").addProperty("ADBE Vector Group");
+    g.name = "Plate";
+    var gc = g.property("ADBE Vectors Group");
+    gc.addProperty("ADBE Vector Shape - Rect");
+    gc.addProperty("ADBE Vector Graphic - Fill");
+    // adding to a group invalidates property objects taken before: fetch them now
+    g = sl.property("ADBE Root Vectors Group").property(1); gc = g.property("ADBE Vectors Group");
+    var rect = gc.property("ADBE Vector Shape - Rect"), fill = gc.property("ADBE Vector Graphic - Fill");
+    rect.property("ADBE Vector Rect Size").setValue([w, h]);
+    rect.property("ADBE Vector Rect Position").setValue([r.left + r.width / 2, r.top + r.height / 2]);
+    rect.property("ADBE Vector Rect Roundness").setValue(num(a.roundness, 0));
+    fill.property("ADBE Vector Fill Color").setValue(colorIn(a.color || "#000000"));
+    fill.property("ADBE Vector Fill Opacity").setValue(num(a.opacity, 100));
+    // in the text's own space: parent without a jump, then put the plate's origin on the text origin
+    sl.setParentWithJump(l);
+    var tr = sl.property("ADBE Transform Group");
+    tr.property("ADBE Anchor Point").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
+    tr.property("ADBE Position").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
+    var rigged = a.rigged !== false, err = null;
+    if (rigged) {
+        var ref = 'thisComp.layer("' + l.name.replace(/"/g, '\\"') + '")';
+        setExpr(rect.property("ADBE Vector Rect Size"), "var r = " + ref + ".sourceRectAtTime(time, false); [r.width + " + (2 * pad[0]) + ", r.height + " + (2 * pad[1]) + "]");
+        setExpr(rect.property("ADBE Vector Rect Position"), "var r = " + ref + ".sourceRectAtTime(time, false); [r.left + r.width / 2, r.top + r.height / 2]");
+        err = exprEval(rect.property("ADBE Vector Rect Size")) || exprEval(rect.property("ADBE Vector Rect Position"));
+        if (err) warn("Rig expression error, the static size is used: " + err);
+    }
+    var out = created(c, sl);
+    out.size = rnd([w, h]); out.rigged = rigged && !err; out.parent = l.name;
+    return out;
+});
+
+def("checkGlyphs", {}, "Which characters a font cannot show (AE 25.1+). args: font (PostScript name, 'Family Style' or 'Family'), text", function (a) {
+    var ps = resolveFont(a.font), miss = missingGlyphs(ps, a.text || "");
+    var ok = true; try { ok = !!app.fonts.getFontsByPostScriptName(ps)[0].hasGlyphsFor; } catch (e) { ok = false; }
+    return { font: ps, checked: ok, missing: miss.join(""), complete: ok && !miss.length };
+});
+
+def("replaceFont", { w: 1 }, "Replace font project-wide, including per-character runs. 'to' may be a PostScript name, 'Family Style' or 'Family'; layers whose text the new font cannot show are listed (missingGlyphs). args: from (PostScript name or regex), to, [regex], [comps|compMatch], [dryRun]", function (a) {
     var comps = getComps(a, true), res = [];
+    a.to = resolveFont(a.to);
     function hit(f) { return a.regex ? toRegex(a.from).test(f) : f === a.from; }
     for (var ci = 0; ci < comps.length; ci++) {
         var c = comps[ci];
@@ -2831,10 +3392,15 @@ def("replaceFont", { w: 1 }, "Replace font project-wide, including per-character
             };
             if (a.dryRun) { var p = textProp(l); fn(p.numKeys ? p.keyValue(1) : p.value); }
             else editDoc(l, undefined, fn);
-            if (found) res.push({ comp: c.name, layer: lref(l), chars: found });
+            if (found) {
+                var rr = { comp: c.name, layer: lref(l), chars: found };
+                var tp = textProp(l), mg = missingGlyphs(a.to, (tp.numKeys ? tp.keyValue(1) : tp.value).text);
+                if (mg.length) { rr.missingGlyphs = mg.join(""); warn("'" + a.to + "' has no glyphs for '" + rr.missingGlyphs + "' in " + c.name + " / " + l.name); }
+                res.push(rr);
+            }
         }
     }
-    return { dryRun: !!a.dryRun, count: res.length, layers: res };
+    return { dryRun: !!a.dryRun, to: a.to, count: res.length, layers: res };
 });
 
 def("setTextBox", { w: 1 }, "Resize paragraph (box) text. args: comp, layer(s), size:[w,h], [position:[x,y]]", function (a) {
@@ -2939,6 +3505,51 @@ def("setPathVertices", { w: 1 }, "Set a path (shape path or mask). args: comp, l
     return pref(p);
 });
 
+def("setPathKeys", { w: 1 }, "Animate a mask or shape path from data (roto from another tool): keys from a JSON file or inline. Times in comp seconds, or in the layer's own time (timeBase:'layer' -> start time and stretch applied), or frames with fps. args: comp, layer, path (mask, shape path group or its Path), file (JSON) | keys:[{t|frame, vertices, [inTangents], [outTangents], [closed]}], [timeBase] comp|layer, [fps] when keys have 'frame', [clear] remove existing keys first", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer), p = resolveProp(l, a.path);
+    if (p.matchName === "ADBE Vector Shape - Group") p = p.property("ADBE Vector Shape");
+    else if (p.matchName === "ADBE Mask Atom") p = p.property("ADBE Mask Shape");
+    if (p.propertyValueType !== PropertyValueType.SHAPE) fail("Not a path property: " + propPath(p));
+    var data = a.keys;
+    if (!data && a.file) { var j = jsonParse(readText(a.file)); data = isArr(j) ? j : (j.keys || j.frames); if (!a.fps && j.fps) a.fps = j.fps; }
+    if (!data || !data.length) fail("keys or file with keys is required");
+    var times = [], shapes = [], i;
+    for (i = 0; i < data.length; i++) {
+        var k = data[i], t = k.t !== undefined ? parseTime(k.t, c.frameRate) : (k.frame !== undefined ? k.frame / num(a.fps, c.frameRate) : null);
+        if (t === null) fail("key " + i + " needs t or frame");
+        if (a.timeBase === "layer") t = l.startTime + t * l.stretch / 100;   // layer (source) time -> comp time
+        times.push(t); shapes.push(shapeIn(k));
+    }
+    var mode = "setValuesAtTimes";
+    withUnlocked(l, function () {
+        if (a.clear) for (var q = p.numKeys; q >= 1; q--) p.removeKey(q);
+        try { p.setValuesAtTimes(times, shapes); }
+        catch (e) { mode = "setValueAtTime"; for (var n = 0; n < times.length; n++) p.setValueAtTime(times[n], shapes[n]); }
+    });
+    return { path: propPath(p), keys: times.length, from: rnd(times[0]), to: rnd(times[times.length - 1]), mode: mode };
+});
+
+def("trackerToNull", { w: 1 }, "Turn a Motion Tracker track point into a null that follows it (keys copied from the attach point; the null is parented to the tracked layer, so it follows that layer too). args: comp, layer (with the tracker), [tracker] name/index (1), [trackPoint] name/index (1), [name] (default '<layer> track')", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer), trs = l.property("ADBE MTrackers");
+    if (!trs || !trs.numProperties) fail("'" + l.name + "' has no Motion Tracker (Window > Tracker > Track Motion first)");
+    var tk = childByKey(trs, a.tracker !== undefined ? a.tracker : 1);
+    if (!tk) fail("Tracker not found: " + a.tracker + ". Trackers: " + childNames(trs));
+    var tp = childByKey(tk, a.trackPoint !== undefined ? a.trackPoint : 1);
+    if (!tp) fail("Track point not found: " + a.trackPoint + ". Track points: " + childNames(tk));
+    var att = tp.property("ADBE MTrack Pt Attach Pt");
+    if (!att || !att.numKeys) fail("The track point has no tracked keys");
+    var n = c.layers.addNull();
+    n.name = a.name || (l.name + " track");
+    n.moveBefore(l);
+    n.setParentWithJump(l);   // the attach point is in the tracked layer's space: parent first, then copy the values as they are
+    var P = n.property("ADBE Transform Group").property("ADBE Position"), times = [], vals = [];
+    for (var k = 1; k <= att.numKeys; k++) { times.push(att.keyTime(k)); vals.push(att.keyValue(k)); }
+    P.setValuesAtTimes(times, vals);
+    var out = created(c, n);
+    out.keys = times.length; out.parent = l.name;
+    return out;
+});
+
 def("setGradient", { w: 1 }, "Gradient fill/stroke geometry (colors can NOT be set by scripting - only type/points/highlight). args: comp, layer, path (to Gradient Fill/Stroke), [type] linear|radial, [start:[x,y]], [end:[x,y]], [highlightLength], [highlightAngle], [opacity]", function (a) {
     var c = getComp(a.comp), l = getLayer(c, a.layer), g = resolveProp(l, a.path);
     function gp(names) {
@@ -2965,7 +3576,7 @@ def("createComp", { w: 1 }, "Create comp. args: name, [width=1920], [height=1080
     var W = num(a.width, 1920), H = num(a.height, 1080), D = num(a.duration, 10), F = num(a.frameRate, 30), c;
     if (ex) {
         var mode = a.ifExists || "error";
-        if (mode === "error") fail("Comp already exists: " + a.name + " (id " + ex.id + "). Use ifExists 'reuse' or 'clear'.");
+        if (mode === "error") fail("Comp already exists: '" + a.name + "' (id " + ex.id + "). Use ifExists 'reuse' or 'clear'.");
         c = ex;
         if (mode === "clear") {
             while (c.numLayers > 0) { c.layer(1).locked = false; c.layer(1).remove(); }
@@ -2993,11 +3604,94 @@ def("setCompSettings", { w: 1 }, "Comp settings. args: comp, any of: name, width
     return compOut(c);
 });
 
-def("duplicateComp", { w: 1 }, "Duplicate comp (not nested comps). args: comp, [name], [folder]", function (a) {
-    var c = getComp(a.comp), d = c.duplicate();
-    if (a.name) d.name = a.name;
-    if (a.folder !== undefined) d.parentFolder = getFolder(a.folder, true);
-    return compOut(d);
+def("duplicateComp", { w: 1 }, "Duplicate comp. deep:true also duplicates nested precomps (each once, cycles safe); deep:'text' only the precomps that contain text layers (language versions: everything else stays shared). Expressions in the copies that name a duplicated comp (comp(\"Name\")) are re-pointed. args: comp, [name], [folder], [deep] false|true|'text', [suffix] for nested copies (default ' copy'), [dryRun]", function (a) {
+    var c = getComp(a.comp), deep = a.deep, suffix = a.suffix !== undefined ? String(a.suffix) : " copy";
+    var memo = {}, plan = [], shared = [], map = {}, renames = [], k;
+    function hasText(cc, seen) {
+        if (memo[cc.id] !== undefined) return memo[cc.id];
+        if (seen[cc.id]) return false;
+        seen[cc.id] = 1;
+        var r = false;
+        for (var i = 1; i <= cc.numLayers && !r; i++) {
+            var l = cc.layer(i);
+            if (l instanceof TextLayer) r = true;
+            else if (l.source instanceof CompItem && hasText(l.source, seen)) r = true;
+        }
+        memo[cc.id] = r;
+        return r;
+    }
+    function wanted(cc) { return deep === true || (deep === "text" && hasText(cc, {})); }
+    function walkPlan(cc, seen) {
+        for (var i = 1; i <= cc.numLayers; i++) {
+            var src = cc.layer(i).source;
+            if (!(src instanceof CompItem) || seen[src.id]) continue;
+            seen[src.id] = 1;
+            if (wanted(src)) { plan.push(src.name); walkPlan(src, seen); } else shared.push(src.name);
+        }
+    }
+    if (deep) walkPlan(c, {});
+    if (a.dryRun) return { dryRun: true, comp: c.name, nestedToDuplicate: plan, nestedShared: shared };
+    function dup(cc, name, folder) {
+        var d = cc.duplicate();
+        d.name = name;
+        if (folder) d.parentFolder = folder;
+        map[cc.id] = d;
+        renames.push([cc.name, d.name]);
+        if (!deep) return d;
+        for (var i = 1; i <= d.numLayers; i++) {
+            var l = d.layer(i), src = l.source;
+            if (!(src instanceof CompItem) || !wanted(src)) continue;
+            if (!map[src.id]) { map[src.id] = "busy"; dup(src, src.name + suffix, folder); }
+            if (map[src.id] !== "busy") withUnlocked(l, function (x) { x.replaceSource(map[src.id], false); });
+        }
+        return d;
+    }
+    var folder = a.folder !== undefined ? getFolder(a.folder, true) : null;
+    var top = dup(c, a.name || (c.name + " copy"), folder);
+    // re-point expressions in the copies: comp("Old") -> comp("New")
+    var fixed = 0;
+    if (deep) {
+        for (k in map) if (has(map, k) && map[k] !== "busy") {
+            var cc = map[k];
+            for (var i = 1; i <= cc.numLayers; i++) walkProps(cc.layer(i), function (p) {
+                try {
+                    if (!p.canSetExpression || p.expression === "") return;
+                    var e = p.expression, e2 = e;
+                    for (var j = 0; j < renames.length; j++) e2 = e2.split('comp("' + renames[j][0] + '")').join('comp("' + renames[j][1] + '")');
+                    if (e2 !== e) { p.expression = e2; fixed++; }
+                } catch (x) {}
+            });
+        }
+    }
+    var out = compOut(top);
+    out.duplicated = renames.length;
+    out.copies = renames;
+    out.nestedShared = shared;
+    if (fixed) out.expressionsRepointed = fixed;
+    return out;
+});
+
+def("resizeComp", { w: 1 }, "Change comp size and keep the content where it was relative to an anchor (layers without a parent move, keys included; cameras/lights keep their aim). For V/VQ/16x9 versions. args: comp, width, height, [anchor] center|topLeft|top|topRight|left|right|bottomLeft|bottom|bottomRight", function (a) {
+    var c = getComp(a.comp), w0 = c.width, h0 = c.height, w1 = Math.round(num(a.width, w0)), h1 = Math.round(num(a.height, h0));
+    var an = String(a.anchor || "center"), fx = /Left$|^left$/.test(an) ? 0 : (/Right$|^right$/.test(an) ? 1 : 0.5), fy = /^top/.test(an) ? 0 : (/^bottom/.test(an) ? 1 : 0.5);
+    var dx = (w1 - w0) * fx, dy = (h1 - h0) * fy, moved = 0;
+    c.width = w1; c.height = h1;
+    for (var i = 1; i <= c.numLayers; i++) {
+        var l = c.layer(i);
+        if (l.parent || (dx === 0 && dy === 0)) continue;
+        withUnlocked(l, function (x) {
+            moveLayerBy(x, dx, dy);
+            if (x instanceof CameraLayer || x instanceof LightLayer) {
+                try {   // point of interest lives in the anchor point of cameras and lights
+                    var poi = x.property("ADBE Transform Group").property("ADBE Anchor Point");
+                    if (poi.numKeys) { for (var k = 1; k <= poi.numKeys; k++) { var v = poi.keyValue(k); v[0] += dx; v[1] += dy; poi.setValueAtKey(k, v); } }
+                    else { var v2 = poi.value; v2[0] += dx; v2[1] += dy; poi.setValue(v2); }
+                } catch (e) {}
+            }
+        });
+        moved++;
+    }
+    return { comp: compOut(c), from: [w0, h0], to: [w1, h1], anchor: an, offset: [rnd(dx), rnd(dy)], layersMoved: moved };
 });
 
 def("setItem", { w: 1 }, "Rename / comment / label a project item. args: item, [name], [comment], [label]", function (a) {
@@ -3022,8 +3716,8 @@ def("deleteItem", { w: 1 }, "Remove project item(s) from the project (undoable; 
     var refs = a.items || [a.item], list = [], r = [], i;
     for (i = 0; i < refs.length; i++) {
         var it = getItem(refs[i]);
-        if (!a.force && !(it instanceof FolderItem) && it.usedIn.length) fail("Item is used in " + it.usedIn.length + " comp(s): " + it.name + " (pass force)");
-        if (!a.force && it instanceof FolderItem && it.numItems) fail("Folder is not empty: " + it.name + " (pass force)");
+        if (!a.force && !(it instanceof FolderItem) && it.usedIn.length) fail("Item is used in " + it.usedIn.length + " comp(s): '" + it.name + "' (pass force)");
+        if (!a.force && it instanceof FolderItem && it.numItems) fail("Folder is not empty: '" + it.name + "' (pass force)");
         list.push({ id: it.id, ref: iref(it) });
     }
     for (i = 0; i < list.length; i++) {
@@ -3172,7 +3866,25 @@ function mapFn(map) {
 }
 def("retimeByMap", { w: 1 }, "Retime comps by a time map (piecewise linear old->new). Each layer moves so its inPoint = f(in) (keys move with it); [trimOut=true] sets outPoint = f(out); [remapKeys] also re-times keys inside layers; comp & layer markers remapped. Nested comps are NOT retimed automatically. args: map:[[old,new],...], [comps|comp|compMatch], [trimOut], [remapKeys], [markers=true], [extendComp], [dryRun]", function (a) {
     if (!a.map) fail("map is required");
-    var f = mapFn(a.map), comps = getComps(a, false), plan = [], i, j;
+    var f = mapFn(a.map), comps = getComps(a, false), plan = [], collisions = [], i, j;
+    if (a.remapKeys) {
+        // check every keyed property first: refuse before anything moves if two keys would land on the same time
+        for (i = 0; i < comps.length; i++) for (j = 1; j <= comps[i].numLayers; j++) {
+            (function (c, l) {
+                walkProps(l, function (p) {
+                    try {
+                        if (!p.numKeys || p.matchName === "ADBE Marker") return;
+                        var caps = [];
+                        for (var k = 1; k <= p.numKeys; k++) caps.push({ t: p.keyTime(k), nt: f(p.keyTime(k)) });
+                        var hit = keyCollisions(caps);
+                        if (hit && collisions.length < 20) collisions.push({ comp: c.name, layer: l.name, path: propPath(p), keys: hit });
+                    } catch (e) {}
+                });
+            })(comps[i], comps[i].layer(j));
+        }
+        if (collisions.length && !a.dryRun) fail("The map would put two keys on the same time in " + collisions.length + " place(s), nothing was changed. First: " +
+            collisions[0].comp + " / " + collisions[0].layer + " / " + collisions[0].path + " (" + collisions[0].keys + "). Run with dryRun:true to see all.");
+    }
     for (i = 0; i < comps.length; i++) {
         var c = comps[i];
         for (j = 1; j <= c.numLayers; j++) {
@@ -3194,7 +3906,45 @@ def("retimeByMap", { w: 1 }, "Retime comps by a time map (piecewise linear old->
         if (!a.dryRun && a.markers !== false) remapMarkers(c.markerProperty, function (t) { return f(t); });
         if (!a.dryRun && a.extendComp) { var nd = f(c.duration); if (nd > c.duration) c.duration = nd; }
     }
-    return { dryRun: !!a.dryRun, layers: plan.length, plan: plan.slice(0, 300) };
+    return { dryRun: !!a.dryRun, layers: plan.length, keyCollisions: collisions, plan: plan.slice(0, 300) };
+});
+
+def("placeAudioCues", { w: 1 }, "Place sound effects from a cue list. Everything is checked first (files, items, times) and nothing changes if anything is wrong; dryRun shows the plan. Files are imported once into [folder]. args: comp, cues:[{t, file | item, [name], [level] dB, [duration]}], [folder='SFX'], [dryRun]", function (a) {
+    var c = getComp(a.comp), cues = a.cues, plan = [], errs = [], i;
+    if (!cues || !cues.length) fail("cues are required");
+    for (i = 0; i < cues.length; i++) {
+        var q = cues[i], t = q.t !== undefined ? parseTime(q.t, c.frameRate) : null, src = null;
+        if (t === null || isNaN(t)) errs.push("cue " + (i + 1) + ": no time");
+        else if (t < 0 || t >= c.duration) errs.push("cue " + (i + 1) + ": time " + rnd(t) + " is outside the comp (0-" + rnd(c.duration) + ")");
+        if (q.item !== undefined) { try { src = getItem(q.item); } catch (e) { errs.push("cue " + (i + 1) + ": " + errStr(e)); } }
+        else if (q.file) { if (!new File(q.file).exists) errs.push("cue " + (i + 1) + ": file not found: " + q.file); }
+        else errs.push("cue " + (i + 1) + ": file or item is required");
+        plan.push({ cue: i + 1, t: t === null ? null : rnd(t), source: q.item !== undefined ? String(q.item) : q.file, name: q.name || null, level: q.level === undefined ? null : q.level });
+    }
+    if (errs.length) fail("Nothing was placed: " + errs.join("; "));
+    if (a.dryRun) return { dryRun: true, cues: plan };
+    var imported = {}, out = [], folder = getFolder(a.folder || "SFX", true);
+    for (i = 0; i < cues.length; i++) {
+        var cq = cues[i], it = null;
+        if (cq.item !== undefined) it = getItem(cq.item);
+        else {
+            var key = new File(cq.file).fsName;
+            if (!imported[key]) { imported[key] = app.project.importFile(new ImportOptions(new File(key))); imported[key].parentFolder = folder; }
+            it = imported[key];
+        }
+        var l = c.layers.add(it);
+        l.startTime = parseTime(cq.t, c.frameRate);
+        if (cq.name) l.name = cq.name;
+        if (cq.duration) l.outPoint = l.startTime + Number(cq.duration);
+        if (cq.level !== undefined) {
+            // layer.property("ADBE Audio Levels") is null on audio layers: use the shortcut, the group walk as a fallback
+            var lv = null; try { lv = l.audioLevels; } catch (e0) {}
+            if (!lv) try { lv = l.property("ADBE Audio Group").property("ADBE Audio Levels"); } catch (e1) {}
+            if (lv) lv.setValue([Number(cq.level), Number(cq.level)]); else warn("Audio Levels not reachable on " + l.name + ": level not set");
+        }
+        out.push(lref(l));
+    }
+    return { placed: out.length, layers: out, imported: keysOf(imported).length };
 });
 
 // ---------------------------------------------------------------- import / footage
@@ -3207,7 +3957,7 @@ def("importFile", { w: 1 }, "Import file(s). args: file | files[], [as] footage|
         if (a["as"]) {
             var ty = { footage: "FOOTAGE", comp: "COMP", compcroppedlayers: "COMP_CROPPED_LAYERS", project: "PROJECT" }[String(a["as"]).toLowerCase()];
             if (!ty) fail("Unknown import type: " + a["as"]);
-            if (!io.canImportAs(ImportAsType[ty])) fail("Cannot import " + f.name + " as " + a["as"]);
+            if (!io.canImportAs(ImportAsType[ty])) fail("Cannot import '" + f.name + "' as " + a["as"]);
             io.importAs = ImportAsType[ty];
         }
         if (a.sequence) io.sequence = true;
@@ -3269,7 +4019,7 @@ def("setProxy", { w: 1 }, "Proxy. args: item, file | none:true, [sequence], [use
     return itemOut(it);
 });
 
-def("cleanupProject", { w: 1 }, "Project cleanup (needs confirm:true). args: action removeUnusedFootage|consolidateFootage|reduceProject, [comps] for reduceProject, confirm", function (a) {
+def("cleanupProject", { w: 1, irreversible: 1 }, "Project cleanup (needs confirm:true). args: action removeUnusedFootage|consolidateFootage|reduceProject, [comps] for reduceProject, confirm", function (a) {
     if (a.confirm !== true) fail("Pass confirm:true");
     if (a.action === "removeUnusedFootage") return { removed: app.project.removeUnusedFootage() };
     if (a.action === "consolidateFootage") return { consolidated: app.project.consolidateFootage() };
@@ -3306,6 +4056,36 @@ def("backupProject", { w: 1, noUndo: 1 }, "Copy the project file to <project fol
     return r;
 });
 
+function backupFolder() {
+    if (!app.project.file) fail("Project was never saved");
+    return new Folder(app.project.file.parent.fsName + "/_backup");
+}
+def("listBackups", {}, "Backups of the open project in <project folder>/_backup (newest first). args: [limit=30]", function (a) {
+    var pf = app.project.file, base = pf ? pf.name.replace(/\.aep$/i, "") : "", fo = backupFolder(), out = [];
+    var fs = fo.exists ? fo.getFiles(function (f) { return f instanceof File && /\.aep$/i.test(f.name) && f.name.indexOf(base + "_") === 0; }) : [];
+    fs.sort(function (x, y) { return y.modified.getTime() - x.modified.getTime(); });
+    for (var i = 0; i < fs.length && i < num(a.limit, 30); i++) out.push({ file: fs[i].fsName, name: fs[i].name, modified: fs[i].modified.toString(), bytes: fs[i].length });
+    return { folder: fo.fsName, count: fs.length, backups: out };
+});
+def("restoreBackup", { w: 1, noUndo: 1 }, "Replace the project with a backup and reopen it. The current saved file is first backed up as '..._before_restore'. Refuses with unsaved changes unless discardUnsaved. args: file (from listBackups), confirm:true, [discardUnsaved]", function (a) {
+    if (a.confirm !== true) fail("Pass confirm:true");
+    var pf = app.project.file;
+    if (!pf) fail("Project was never saved");
+    var src = new File(a.file);
+    if (!src.exists) fail("Backup not found: " + a.file);
+    if (!isUnder(src.fsName, backupFolder().fsName)) fail("Only files from " + backupFolder().fsName + " can be restored");
+    var dirty = false; try { dirty = app.project.dirty; } catch (e) {}
+    if (dirty && a.discardUnsaved !== true) fail("The project has unsaved changes. Save first (saveProject) or pass discardUnsaved:true");
+    var safety = RB.cmds.backupProject.fn({ label: "before_restore" }).backup;
+    var path = pf.fsName;
+    app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
+    var dest = new File(path);
+    if (dest.exists) dest.remove();
+    if (!src.copy(path)) fail("Copy failed: " + src.error + " (the previous state is in " + safety + ")");
+    app.open(new File(path));
+    return { restored: src.fsName, project: path, previousStateSavedAs: safety };
+});
+
 // ---------------------------------------------------------------- guides & layout
 def("guides", { w: 1 }, "Comp guides. args: comp, [add:[{orientation:'h'|'v', position}]], [remove:[index...]|'all']", function (a) {
     var c = getComp(a.comp), i;
@@ -3316,6 +4096,74 @@ def("guides", { w: 1 }, "Comp guides. args: comp, [add:[{orientation:'h'|'v', po
 });
 
 function boundsOf(l, t) { var b = compBounds(l, t); if (!b) fail("No bounds for " + l.name); return b; }
+def("stack", { w: 1 }, "Line layers up one after another by their visual bounds with a gap (first layer stays, or starts at 'start'). args: comp, layers (in order), [axis] y|x (default y), [gap=20] px, [align] start|center|end on the other axis (default: keep), [start] [x,y] top-left of the first, [time]", function (a) {
+    var c = getComp(a.comp), ls = getLayers(c, a), t = num(a.time, c.time), ax = a.axis === "x" ? "x" : "y", gap = num(a.gap, 20), i, out = [];
+    if (ls.length < 2 && !a.start) fail("stack needs 2+ layers (or a start position)");
+    var b0 = boundsOf(ls[0], t);
+    if (a.start) { moveLayerBy(ls[0], a.start[0] - b0.left, a.start[1] - b0.top); b0 = boundsOf(ls[0], t); }
+    var ref = b0, cursor = ax === "y" ? b0.bottom : b0.right;
+    for (i = 1; i < ls.length; i++) {
+        var b = boundsOf(ls[i], t), dx = 0, dy = 0;
+        if (ax === "y") {
+            dy = cursor + gap - b.top;
+            if (a.align === "start") dx = ref.left - b.left; else if (a.align === "end") dx = ref.right - b.right; else if (a.align === "center") dx = (ref.left + ref.right) / 2 - (b.left + b.right) / 2;
+        } else {
+            dx = cursor + gap - b.left;
+            if (a.align === "start") dy = ref.top - b.top; else if (a.align === "end") dy = ref.bottom - b.bottom; else if (a.align === "center") dy = (ref.top + ref.bottom) / 2 - (b.top + b.bottom) / 2;
+        }
+        moveLayerBy(ls[i], dx, dy);
+        var nb = boundsOf(ls[i], t);
+        cursor = ax === "y" ? nb.bottom : nb.right;
+        out.push({ layer: lref(ls[i]), moved: rnd([dx, dy]) });
+    }
+    return { axis: ax, gap: gap, layers: out };
+});
+
+def("pin", { w: 1 }, "Put layers against an edge or corner of the frame by their visual bounds, with a margin (px, [x,y], or safe:0.9 = title-safe area). args: comp, layer(s), edge top|bottom|left|right|topLeft|topRight|bottomLeft|bottomRight|center, [margin=0], [safe] ratio, [time]", function (a) {
+    var c = getComp(a.comp), ls = getLayers(c, a), t = num(a.time, c.time), e = String(a.edge || ""), out = [];
+    var m = isArr(a.margin) ? a.margin : [num(a.margin, 0), num(a.margin, 0)];
+    if (a.safe) { m = [m[0] + c.width * (1 - a.safe) / 2, m[1] + c.height * (1 - a.safe) / 2]; }
+    var L = m[0], T = m[1], R = c.width - m[0], B = c.height - m[1];
+    if (!/^(top|bottom|left|right|topLeft|topRight|bottomLeft|bottomRight|center)$/.test(e)) fail("edge must be top, bottom, left, right, topLeft, topRight, bottomLeft, bottomRight or center");
+    for (var i = 0; i < ls.length; i++) {
+        var b = boundsOf(ls[i], t), dx = 0, dy = 0;
+        if (/left/i.test(e)) dx = L - b.left; else if (/right/i.test(e)) dx = R - b.right; else if (e !== "top" && e !== "bottom") dx = c.width / 2 - (b.left + b.right) / 2;
+        if (/^top/.test(e)) dy = T - b.top; else if (/^bottom/.test(e)) dy = B - b.bottom; else if (e !== "left" && e !== "right") dy = c.height / 2 - (b.top + b.bottom) / 2;
+        if (e === "top" || e === "bottom") dx = 0;
+        if (e === "left" || e === "right") dy = 0;
+        moveLayerBy(ls[i], dx, dy);
+        out.push({ layer: lref(ls[i]), moved: rnd([dx, dy]) });
+    }
+    return { edge: e, margin: rnd(m), layers: out };
+});
+
+def("zoomToRect", { w: 1 }, "Push in on a rectangle or a layer: a rig null (anchor on the target) parents the layers and animates position + scale, so the target stays exactly on its path (no drift). args: comp, rect [x,y,w,h] | target (layer), range:[t0,t1], [fill=0.9] share of the frame the target fills, [layers] to put under the rig (default: all layers without a parent, not cameras/lights), [name='ZOOM_RIG'], [ease='easy'], [time] for the target bounds", function (a) {
+    var c = getComp(a.comp), t = num(a.time, a.range ? a.range[0] : c.time), r, i;
+    if (a.rect) r = { left: a.rect[0], top: a.rect[1], width: a.rect[2], height: a.rect[3] };
+    else if (a.target !== undefined) { var tb = boundsOf(getLayer(c, a.target), t); r = { left: tb.left, top: tb.top, width: tb.right - tb.left, height: tb.bottom - tb.top }; }
+    else fail("rect or target is required");
+    if (!a.range) fail("range [t0,t1] is required");
+    var t0 = parseTime(a.range[0], c.frameRate), t1 = parseTime(a.range[1], c.frameRate);
+    var C = [r.left + r.width / 2, r.top + r.height / 2], fill = num(a.fill, 0.9);
+    var s = Math.min(c.width * fill / r.width, c.height * fill / r.height) * 100;
+    var rig = c.layers.addNull();
+    rig.name = a.name || "ZOOM_RIG";
+    var tr = rig.property("ADBE Transform Group"), P = tr.property("ADBE Position"), S = tr.property("ADBE Scale"), A = tr.property("ADBE Anchor Point");
+    // the null's anchor sits at the centre of its 100x100 source: put its position on the target, scale around it
+    P.setValue(C);
+    var kids = [];
+    if (a.layers) kids = getLayers(c, { layers: a.layers });
+    else for (i = 1; i <= c.numLayers; i++) { var l = c.layer(i); if (l !== rig && !l.parent && !(l instanceof CameraLayer) && !(l instanceof LightLayer)) kids.push(l); }
+    for (i = 0; i < kids.length; i++) withUnlocked(kids[i], function (x) { x.parent = rig; });   // parent with compensation: nothing moves
+    var spec = { ease: a.ease === undefined ? "easy" : a.ease };
+    P.setValueAtTime(t0, C); P.setValueAtTime(t1, [c.width / 2, c.height / 2]);
+    S.setValueAtTime(t0, [100, 100]); S.setValueAtTime(t1, [s, s]);
+    applyKeySpec(P, 1, spec); applyKeySpec(P, 2, spec); applyKeySpec(S, 1, spec); applyKeySpec(S, 2, spec);
+    try { P.setSpatialTangentsAtKey(1, [0, 0], [0, 0]); P.setSpatialTangentsAtKey(2, [0, 0], [0, 0]); } catch (e) {}   // straight path
+    rig.moveToBeginning();
+    return { rig: lref(rig), target: { center: rnd(C), size: rnd([r.width, r.height]) }, scale: rnd(s), layersParented: kids.length, range: [rnd(t0), rnd(t1)] };
+});
+
 def("align", { w: 1 }, "Align layers (by visual bounds). args: comp, layer(s), edge left|hcenter|right|top|vcenter|bottom, [to] 'comp' (default)|'selection'|layer ref|number (pixel), [time]", function (a) {
     var c = getComp(a.comp), ls = getLayers(c, a), t = num(a.time, c.time), e = a.edge, i;
     if (!e) fail("edge is required");
@@ -3368,7 +4216,7 @@ def("centerAnchor", { w: 1 }, "Move anchor point to content center (or a corner)
     if (!W) fail("Bad where: " + a.where);
     for (var i = 0; i < ls.length; i++) {
         var l = ls[i], tr = l.property("ADBE Transform Group"), ap = tr.property("ADBE Anchor Point");
-        if (ap.numKeys || ap.expression !== "") fail("Anchor of " + l.name + " is keyed or has an expression");
+        if (ap.numKeys || ap.expression !== "") fail("Anchor of '" + l.name + "' is keyed or has an expression");
         var s = l.sourceRectAtTime(t, false), old = ap.value;
         var na = [s.left + s.width * W[0], s.top + s.height * W[1]];
         var M = layerMatrix(l, t), p0 = applyMat(M, old[0], old[1]), p1 = applyMat(M, na[0], na[1]);
@@ -3465,6 +4313,54 @@ def("lookAt", { w: 1 }, "Aim a camera/light (point of interest) or orient a 3D l
     }
     return r;
 });
+
+def("cameraMove", { w: 1 }, "Animate a camera with one move: dolly (toward the point of interest), truck (sideways), pedestal (up/down: negative = up), orbit (degrees around the point of interest), dollyZoom (dolly + zoom that keeps the subject size: Vertigo), handheld (wiggle). args: comp, layer (camera), move, amount (px; degrees for orbit; shake px for handheld), [range:[t0,t1]] (default work area), [ease='easy'], [steps=12] for orbit, [frequency=1.5] for handheld", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer), mv = String(a.move || "");
+    if (!(l instanceof CameraLayer)) fail("cameraMove needs a camera layer: '" + l.name + "'");
+    var tr = l.property("ADBE Transform Group"), P = tr.property("ADBE Position"), A = tr.property("ADBE Anchor Point");
+    var twoNode = false; try { twoNode = l.autoOrient === AutoOrientType.CAMERA_OR_POINT_OF_INTEREST; } catch (e) {}
+    var t0 = a.range ? parseTime(a.range[0], c.frameRate) : c.workAreaStart, t1 = a.range ? parseTime(a.range[1], c.frameRate) : c.workAreaStart + c.workAreaDuration;
+    if (t1 <= t0) fail("range must go forward");
+    var amt = num(a.amount, 0), spec = { ease: a.ease === undefined ? "easy" : a.ease }, out = { camera: l.name, move: mv, range: [rnd(t0), rnd(t1)] };
+    var P0 = P.valueAtTime(t0, false), A0 = A.valueAtTime(t0, false);
+    function key(p, t, v, sp) { p.setValueAtTime(t, v); if (sp) applyKeySpec(p, p.nearestKeyIndex(t), sp); }
+    function plus(v, d) { return [v[0] + d[0], v[1] + d[1], v[2] + d[2]]; }
+    var dir = [A0[0] - P0[0], A0[1] - P0[1], A0[2] - P0[2]], d0 = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if ((mv === "dolly" || mv === "dollyZoom" || mv === "orbit") && !twoNode) fail(mv + " needs a two-node camera (Auto-Orient towards point of interest)");
+    withUnlocked(l, function () {
+        if (mv === "dolly" || mv === "dollyZoom") {
+            if (d0 < 1e-6) fail("camera sits on its point of interest");
+            var u = [dir[0] / d0, dir[1] / d0, dir[2] / d0], P1 = plus(P0, [u[0] * amt, u[1] * amt, u[2] * amt]);
+            key(P, t0, P0, spec); key(P, t1, P1, spec);
+            if (mv === "dollyZoom") {
+                var Z = l.property("ADBE Camera Options Group").property("ADBE Camera Zoom"), z0 = Z.valueAtTime(t0, false), d1 = d0 - amt;
+                if (d1 <= 1) fail("dollyZoom amount brings the camera past its point of interest");
+                key(Z, t0, z0, spec); key(Z, t1, z0 * d1 / d0, spec);
+                out.zoom = [rnd(z0), rnd(z0 * d1 / d0)];
+            }
+            out.position = [rnd(P0), rnd(P1)];
+        } else if (mv === "truck" || mv === "pedestal") {
+            var d = mv === "truck" ? [amt, 0, 0] : [0, amt, 0];
+            key(P, t0, P0, spec); key(P, t1, plus(P0, d), spec);
+            if (twoNode) { key(A, t0, A0, spec); key(A, t1, plus(A0, d), spec); }
+            out.offset = d;
+        } else if (mv === "orbit") {
+            var n = Math.max(2, Math.round(num(a.steps, 12))), ox = P0[0] - A0[0], oz = P0[2] - A0[2];
+            for (var k = 0; k <= n; k++) {
+                var ang = amt * k / n * Math.PI / 180, cs = Math.cos(ang), sn = Math.sin(ang);
+                key(P, t0 + (t1 - t0) * k / n, [A0[0] + ox * cs - oz * sn, P0[1], A0[2] + ox * sn + oz * cs], (k === 0 || k === n) ? spec : null);
+            }
+            for (k = 2; k <= n; k++) try { P.setRovingAtKey(P.nearestKeyIndex(t0 + (t1 - t0) * (k - 1) / n), true); } catch (e) {}  // even speed
+            out.degrees = amt; out.keys = n + 1;
+        } else if (mv === "handheld") {
+            var f = num(a.frequency, 1.5), am = amt || 15;
+            setExpr(P, "wiggle(" + f + ", " + am + ")");
+            if (twoNode) setExpr(A, "wiggle(" + f + ", " + (am * 0.6) + ")");
+            out.expression = "wiggle(" + f + ", " + am + ")";
+        } else fail("move must be dolly, truck, pedestal, orbit, dollyZoom or handheld");
+    });
+    return out;
+});
 def("renderer3D", { w: 1 }, "Comp 3D renderer. args: comp, renderer classic|cinema4d|advanced|<internal name>", function (a) {
     var c = getComp(a.comp), map = { classic: "ADBE Calder", cinema4d: "ADBE Ernst", advanced: "ADBE Advanced 3d" };
     var name = map[String(a.renderer).toLowerCase()] || a.renderer;
@@ -3488,19 +4384,61 @@ def("motionBlurSettings", { w: 1 }, "Motion blur. args: comp, [enabled] comp swi
 });
 
 // ---------------------------------------------------------------- render
-function addRQ(c, a, file) {
-    var q = app.project.renderQueue.items.add(c);
-    if (a.renderTemplate) q.applyTemplate(a.renderTemplate);
-    if (a.outputTemplate) q.outputModule(1).applyTemplate(a.outputTemplate);
-    if (a.range) { q.timeSpanStart = a.range[0]; q.timeSpanDuration = a.range[1] - a.range[0]; }
-    else if (a.workArea !== false) { q.timeSpanStart = c.workAreaStart; q.timeSpanDuration = c.workAreaDuration; }
-    q.outputModule(1).file = new File(file);
-    return q;
+// Output templates that write each extension (AE picks the container from the template, not from the file name:
+// an .mp4 path with the default template silently becomes a huge lossless .mov).
+var EXT_TEMPLATES = {
+    mp4: /H\.?264/i, mov: /ProRes|Lossless|QuickTime|High Quality/i, avi: /AVI/i, png: /PNG/i, jpg: /JPE?G/i, jpeg: /JPE?G/i,
+    tif: /TIFF/i, tiff: /TIFF/i, tga: /Targa/i, exr: /EXR/i, dpx: /DPX|Cineon/i, psd: /Photoshop/i, wav: /WAV|Audio Only/i, mp3: /MP3/i
+};
+var SEQ_EXT = { png: 1, jpg: 1, jpeg: 1, tif: 1, tiff: 1, tga: 1, exr: 1, dpx: 1, psd: 1 };
+function fileExt(p) { var m = String(p).match(/\.([A-Za-z0-9]+)$/); return m ? m[1].toLowerCase() : ""; }
+function clampSpan(c, a, q) {
+    var t0 = a.range ? Number(a.range[0]) : (a.workArea !== false ? c.workAreaStart : 0);
+    var t1 = a.range ? Number(a.range[1]) : (a.workArea !== false ? c.workAreaStart + c.workAreaDuration : c.duration);
+    var c0 = Math.max(0, t0), c1 = Math.min(c.duration, t1);
+    if (c0 !== t0 || c1 !== t1) warn("Render range clamped to the comp: [" + rnd(c0) + ", " + rnd(c1) + "] (asked [" + t0 + ", " + t1 + "])");
+    if (c1 - c0 < c.frameDuration) fail("Render range is empty after clamping to the comp duration " + rnd(c.duration) + " s");
+    q.timeSpanStart = c0; q.timeSpanDuration = c1 - c0;
 }
-def("addToRenderQueue", { w: 1 }, "Add comp to Render Queue (does not render). args: comp, file (output, allowed folders), [renderTemplate], [outputTemplate], [range:[start,end]] or [workArea=true]", function (a) {
+function addRQ(c, a, file) {
+    var ext = fileExt(file);
+    if (SEQ_EXT[ext] && !/\[#+\]/.test(file)) file = file.replace(/\.([A-Za-z0-9]+)$/, "_[#####].$1");
+    if (!SEQ_EXT[ext] && new File(file).exists && a.overwrite !== true) fail("Output file exists: '" + file + "'. Pass overwrite:true or another file.");
+    var q = app.project.renderQueue.items.add(c), ok = false;
+    try {
+        if (a.renderTemplate) {
+            if (idxOf(q.templates, a.renderTemplate) < 0) fail("Render template not found: '" + a.renderTemplate + "'. Available: " + q.templates.join(", "));
+            q.applyTemplate(a.renderTemplate);
+        }
+        var om = q.outputModule(1), tpl = a.outputTemplate;
+        if (tpl && idxOf(om.templates, tpl) < 0) fail("Output template not found: '" + tpl + "'. Available: " + om.templates.join(", "));
+        if (tpl) om.applyTemplate(tpl);
+        clampSpan(c, a, q);
+        om.file = new File(file);
+        var real = om.file ? om.file.fsName : "", rext = fileExt(real);
+        if (!a.outputTemplate && ext && rext !== ext && EXT_TEMPLATES[ext]) {
+            // the default template writes another container: try the templates that write this extension
+            for (var i = 0; i < om.templates.length && rext !== ext; i++) {
+                var t = om.templates[i];
+                if (!EXT_TEMPLATES[ext].test(t) || /^_HIDDEN/.test(t)) continue;
+                om.applyTemplate(t); om.file = new File(file);
+                real = om.file ? om.file.fsName : ""; rext = fileExt(real); tpl = t;
+            }
+        }
+        if (ext && rext && rext !== ext) fail("After Effects would write '." + rext + "', not '." + ext + "' (output template '" + (tpl || "default") +
+            "'). " + (tpl ? "" : "No output template here writes ." + ext + ": make one in AE (Edit > Templates > Output Module), or use another extension. ") +
+            "Templates: " + om.templates.join(", "));
+        ok = true;
+        return { q: q, file: real, template: tpl || null };
+    } finally {
+        if (!ok) try { q.remove(); } catch (e) {}
+    }
+}
+def("addToRenderQueue", { w: 1 }, "Add comp to Render Queue (does not render). Picks an output template that writes the file's extension, refuses if AE would write another container, adds [#####] for image sequences, clamps the range to the comp. args: comp, file (output, allowed folders), [renderTemplate], [outputTemplate], [range:[start,end]] or [workArea=true], [overwrite]", function (a) {
     var c = getComp(a.comp), file = safeOut(a.file || ("renders/" + safeName(c.name) + ".mov"));
-    var q = addRQ(c, a, file);
-    return { index: app.project.renderQueue.numItems, file: file, renderTemplates: q.templates, outputTemplates: q.outputModule(1).templates };
+    var r = addRQ(c, a, file), q = r.q;
+    return { index: app.project.renderQueue.numItems, file: r.file, outputTemplate: r.template, start: rnd(q.timeSpanStart), duration: rnd(q.timeSpanDuration),
+             renderTemplates: q.templates, outputTemplates: q.outputModule(1).templates };
 });
 def("clearRQ", { w: 1 }, "Remove render queue items. args: [onlyDone] | [indexes]", function (a) {
     var rq = app.project.renderQueue, n = 0;
@@ -3516,7 +4454,27 @@ def("clearRQ", { w: 1 }, "Remove render queue items. args: [onlyDone] | [indexes
 def("startRender", { w: 1, noUndo: 1 }, "Render the whole queue now (blocks AE until done). args: confirm:true", function (a) {
     if (a.confirm !== true) fail("Pass confirm:true");
     app.project.renderQueue.render();
-    return RB.cmds.listRQ.fn({});
+    var r = RB.cmds.listRQ.fn({});
+    // which outputs really exist (an image sequence: count the frames)
+    var outs = [];
+    try {
+        var rq = app.project.renderQueue;
+        for (var i = 1; i <= rq.numItems; i++) {
+            var q = rq.item(i);
+            for (var m = 1; m <= q.numOutputModules; m++) {
+                var f = q.outputModule(m).file;
+                if (!f) continue;
+                var o = { item: i, file: f.fsName, exists: f.exists };
+                if (/\[#+\]/.test(f.name)) {
+                    var pre = f.name.split("[")[0], list = f.parent.getFiles(function (x) { return x instanceof File && x.name.indexOf(pre) === 0; });
+                    o.frames = list.length; o.exists = list.length > 0;
+                }
+                outs.push(o);
+            }
+        }
+    } catch (e) {}
+    r.outputs = outs;
+    return r;
 });
 def("queueInAME", { w: 1, noUndo: 1 }, "Send queued items to Adobe Media Encoder. args: [render] start immediately", function (a) {
     var rq = app.project.renderQueue;
@@ -3537,16 +4495,17 @@ def("renderPreview", { w: 1, noUndo: 1 }, "Quick H.264 preview of a range (block
         if (pick) q.outputModule(1).applyTemplate(pick); else warn("No H.264 output template found, using default output module");
         if (idxOf(q.templates, "Draft Settings") >= 0) q.applyTemplate("Draft Settings");
         if (a.half !== false) try { q.setSetting("Resolution", "Half"); } catch (e) {}
-        if (a.range) { q.timeSpanStart = a.range[0]; q.timeSpanDuration = a.range[1] - a.range[0]; }
-        else { q.timeSpanStart = c.workAreaStart; q.timeSpanDuration = c.workAreaDuration; }
+        clampSpan(c, a, q);
         q.outputModule(1).file = new File(file);
+        var real = q.outputModule(1).file.fsName;
+        if (fileExt(real) !== fileExt(file)) { file = real; warn("After Effects writes '." + fileExt(real) + "' with the chosen template: " + real); }
         rq.render();
     } finally {
         try { rq.item(qi).remove(); } catch (e) {}
         for (var s = 0; s < states.length; s++) { try { rq.item(states[s][0]).render = states[s][1]; } catch (e) {} }
     }
     var out = new File(file);
-    return { file: file, exists: out.exists };
+    return { file: file, exists: out.exists, bytes: out.exists ? out.length : 0 };
 });
 
 // ---------------------------------------------------------------- menu commands (fixed whitelist only)
@@ -3621,7 +4580,7 @@ def("purgeCache", {}, "Purge AE caches. args: [target] all_caches|undo_caches|sn
 });
 
 // ---------------------------------------------------------------- batch
-def("batch", {}, "Run several commands in order as ONE undo step. Stops at first error. args: commands:[{command, args}], [undoName]", function (a) {
+def("batch", {}, "Run several commands in order as ONE undo step. Stops at the first error and rolls back the steps already done (atomic:false keeps them). diff:true returns {results, diff} with what changed in the comps the batch touches. args: commands:[{command, args}], [undoName], [atomic=true], [diff]", function (a) {
     if (!a.commands || !a.commands.length) fail("commands are required");
     var anyWrite = false, i;
     for (i = 0; i < a.commands.length; i++) {
@@ -3632,15 +4591,41 @@ def("batch", {}, "Run several commands in order as ONE undo step. Stops at first
         if (cm.noUndo && cm.w) fail("'" + a.commands[i].command + "' cannot run inside batch");
     }
     if (anyWrite && !RB.allowWrites()) fail("Batch contains write commands, but 'Allow changes' is off");
-    var results = [];
+    var results = [], err = null, at = -1, rev0 = projRevision(), before = null, dcomps = [];
+    if (a.diff) {
+        // comps named in the commands (comp / toComp) - fingerprint them before
+        var seen = {};
+        for (i = 0; i < a.commands.length; i++) {
+            var ar = a.commands[i].args || {}, refs = [ar.comp, ar.toComp];
+            for (var q = 0; q < refs.length; q++) {
+                if (refs[q] === undefined) continue;
+                try { var cc = getComp(refs[q]); if (!seen[cc.id]) { seen[cc.id] = 1; dcomps.push(cc); } } catch (e0) {}
+            }
+        }
+        before = {};
+        for (i = 0; i < dcomps.length; i++) flattenDump(compFull(dcomps[i]), before);
+    }
     if (anyWrite) app.beginUndoGroup("BridgeLine: " + (a.undoName || "batch"));
     try {
         for (i = 0; i < a.commands.length; i++) {
             try { results.push({ command: a.commands[i].command, ok: true, result: RB.run(a.commands[i].command, a.commands[i].args || {}, true) }); }
-            catch (e) { results.push({ command: a.commands[i].command, ok: false, error: errStr(e) }); fail("Batch stopped at #" + (i + 1) + " " + a.commands[i].command + ": " + errStr(e) + " | done before: " + i); }
+            catch (e) { results.push({ command: a.commands[i].command, ok: false, error: errStr(e) }); err = e; at = i; break; }
         }
     } finally { if (anyWrite) app.endUndoGroup(); }
-    return results;
+    if (err) {
+        var kept = "done before: " + at + " (kept)";
+        if (anyWrite && at > 0 && a.atomic !== false) {
+            // undo our own group only: the revision proves it changed something (so the last undo step is ours)
+            var rev1 = projRevision();
+            if (rev0 !== null && rev1 !== null && rev1 !== rev0) { app.executeCommand(16); kept = "the " + at + " step(s) before were rolled back, nothing changed"; }
+            else if (rev0 === null) kept += "; this AE cannot report changes, so no automatic rollback - use Undo if needed";
+        }
+        fail("Batch stopped at #" + (at + 1) + " " + a.commands[at].command + ": " + errStr(err) + " | " + kept);
+    }
+    if (!a.diff) return results;
+    var after = {};
+    for (i = 0; i < dcomps.length; i++) { try { flattenDump(compFull(dcomps[i]), after); } catch (e1) {} }
+    return { results: results, diff: flatDiff(before, after, num(a.diffLimit, 200)) };
 });
 // ================================================================ PANEL UI + POLLING
 
@@ -3703,8 +4688,39 @@ RB.checkUpdateNote = function () {
     try { RB.ui.win.layout.layout(true); } catch (e2) {}
 };
 
+// ---------------------------------------------------------------- heartbeat / per-command results
+// status/<AE version>.json: what this panel is doing, so the client can explain a silence (closed, read-only, busy with X,
+// frozen by a dialog) and route a command to the AE that has the project open without waiting.
+// results/<id>.json: every result kept by id (last 100), so a late answer is not lost when the next command overwrites result.json.
+RB.statusPath = RB.root + "/status/" + safeName(app.version) + ".json";
+RB.statusTicks = 0;
+RB.busyCmd = null; RB.busySince = null;
+RB.writeStatus = function () {
+    try {
+        var st = { panel: RB.VERSION, ae: app.version, time: new Date().getTime(), listen: !!(RB.ui && RB.ui.listen.value),
+                   allowChanges: RB.allowWrites(), project: app.project.file ? app.project.file.fsName : null,
+                   busy: RB.busyCmd, busySince: RB.busySince, root: RB.root };
+        writeAtomic(RB.statusPath, jsonStr(st));
+    } catch (e) {}
+};
+RB.keepResult = function (res) {
+    if (!res || !res.id) return;
+    try {
+        writeText(RB.root + "/results/" + safeName(res.id) + ".json", jsonStr(res, " "));
+        if (++RB.keptCount % 25 === 0) {
+            var fs = new Folder(RB.root + "/results").getFiles("*.json");
+            if (fs.length > 100) {
+                fs.sort(function (x, y) { return x.modified.getTime() - y.modified.getTime(); });
+                for (var i = 0; i < fs.length - 100; i++) try { fs[i].remove(); } catch (e1) {}
+            }
+        }
+    } catch (e) {}
+};
+RB.keptCount = 0;
+
 RB.tick = function () {
     if (!RB.busy && (RB.updTicks++ % 20) === 0) { try { RB.checkUpdateNote(); } catch (eu) {} }
+    if (!RB.busy && (RB.statusTicks++ % 7) === 0) RB.writeStatus();
     if (RB.busy || !RB.ui || !RB.ui.listen.value) return;
     var f = new File(RB.cmdPath);
     if (!f.exists) return;
@@ -3737,18 +4753,26 @@ RB.tick = function () {
         }
         RB.log("> " + cmd.command + " " + shorten(jsonStr(cmd.args || {}), 140));
         RB.setStatus("Running: " + cmd.command);
+        RB.busyCmd = { id: cmd.id, command: cmd.command }; RB.busySince = new Date().getTime(); RB.writeStatus();
+        var rev0 = projRevision();
         res.result = RB.run(cmd.command, cmd.args || {});
         res.ok = true;
+        var rev1 = projRevision();
+        if (rev0 !== null) res.revision = (rev1 === rev0) ? rev0 : [rev0, rev1]; // a write that did not change the number changed nothing
         RB.log("  ok (" + (new Date().getTime() - t0) + " ms)");
     } catch (e) {
         res.error = errStr(e);
         RB.log("! " + res.error);
+        // full arguments of the failing command, for bug reports (the "> " line above is shortened)
+        try { if (cmd) RB.log("  args: " + shorten(jsonStr(cmd.args || {}), 4000)); } catch (ea) {}
     }
     res.ms = new Date().getTime() - t0;
     res.finished = stamp();
     if (RB.warnings.length) res.warnings = RB.warnings;
     try { writeAtomic(RB.resPath, jsonStr(res, " ")); }
     catch (e2) { RB.log("! cannot write result: " + errStr(e2)); }
+    RB.keepResult(res);
+    RB.busyCmd = null; RB.busySince = null; RB.writeStatus();
     RB.setStatus();
     RB.busy = false;
 };
@@ -3842,7 +4866,8 @@ function buildUI(thisObj) {
 // ---------------------------------------------------------------- start
 ensureFolder(RB.root);
 buildUI(thisObj);
-RB.log("Started. Bridge folder: " + RB.root + "  (" + keysOf(RB.cmds).length + " commands)");
+RB.log("Started BridgeLine " + RB.VERSION + " | AE " + app.version + " (" + app.isoLanguage + ") | " + $.os +
+       " | " + keysOf(RB.cmds).length + " commands | bridge folder " + RB.root);
 $.global.__bridgeLineTick = function () { try { RB.tick(); } catch (e) { RB.busy = false; } };
 try { if ($.global.__bridgeLineTask) app.cancelTask($.global.__bridgeLineTask); } catch (e) {}
 $.global.__bridgeLineTask = app.scheduleTask("__bridgeLineTick()", 300, true);

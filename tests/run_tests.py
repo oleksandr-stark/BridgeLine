@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Full functional test of BridgeLine. Run ONLY with the test project open
-   (an empty project saved as tests/bridge_test.aep, or set AEB_TEST_PROJECT).
+"""Full functional test of BridgeLine. Run ONLY with a test project open: any project whose file name starts with
+   bridge_test (e.g. an empty project saved as tests/bridge_test_26.aep in the AE version you test), or set AEB_TEST_PROJECT.
    python3 tests/run_tests.py [phase ...]    phases: setup layers props fx project read edge (default: all)
 """
 import glob, json, os, sys, tempfile, time, traceback
@@ -8,8 +8,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import aeb
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PROJECT = os.environ.get("AEB_TEST_PROJECT", os.path.join(HERE, "bridge_test.aep"))
+def find_test_project():
+    """AEB_TEST_PROJECT, else the open project of a listening panel whose file is named bridge_test*.aep (any AE version,
+    any folder - the name is the safety check: the tests create and delete comps), else tests/bridge_test.aep."""
+    if os.environ.get("AEB_TEST_PROJECT"):
+        return os.environ["AEB_TEST_PROJECT"]
+    for st in aeb.panel_statuses(max_age=30):
+        p = st.get("project") or ""
+        if st.get("listen") and os.path.basename(p).lower().startswith("bridge_test") and p.lower().endswith(".aep"):
+            return p
+    return os.path.join(HERE, "bridge_test.aep")
+
+
+PROJECT = find_test_project()
 ASSETS = os.path.join(HERE, "assets")
+OUT = os.path.join(os.path.dirname(PROJECT), "out")   # the panel writes only next to the project (or to its exchange folder)
 TMP = tempfile.gettempdir()  # outside the folders the panel may write to
 
 
@@ -108,7 +121,8 @@ def _():
     check(p["project"] == PROJECT, "wrong project open: %s" % p["project"])
     check(p["allowWrites"], "Allow changes is off")
     res, code = aeb.send("ping", {}, 20, os.path.join(TMP, "other_project.aep"))
-    check(not res.get("ok") and "Project guard" in res.get("error", ""), "project guard did not block: %s" % res)
+    # the panel refuses (project guard), or since 1.0.5 the client already refuses from the heartbeats - nothing runs either way
+    check(not res.get("ok") and ("Project guard" in res.get("error", "") or "no listening After Effects" in res.get("error", "")), "project guard did not block: %s" % res)
 
 
 @test("reset test project")
@@ -433,6 +447,8 @@ def _():
         c = r("addControl", {"comp": "T_Link", "layer": "CTL", "type": t, "name": "C_" + t, "value": v})
         check(c["expressionRef"].startswith("thisComp.layer(\"CTL\")"), c)
     dd = r("addControl", {"comp": "T_Link", "layer": "CTL", "type": "dropdown", "name": "C_dd", "items": ["One", "Two", "Three"], "value": 2})
+    check(dd["effect"] == "C_dd", "dropdown keeps its name: %s" % dd)  # AE 26+ drops it if named before the items
+    check(close(val("T_Link", "CTL", "effects/C_dd/Menu"), 2), "dropdown value")
     check(close(val("T_Link", "CTL", "effects/C_slider/Slider"), 42), "slider")
     l = r("linkProperty", {"comp": "T_Link", "layer": "TARGET", "path": "rotation", "source": {"layer": "CTL", "path": "effects/C_slider/Slider"}, "template": "$ * 2"})
     check("error" not in l[0], l)
@@ -458,7 +474,7 @@ def _():
 def _():
     eg = r("addToEssentialGraphics", {"comp": "T_Main", "layer": "TITLE", "paths": ["sourceText", "opacity"], "names": ["Title text", "Title opacity"], "templateName": "TEST_MOGRT"})
     check(all(x["added"] for x in eg), eg)
-    m = r("exportMogrt", {"comp": "T_Main", "file": os.path.join(HERE, "out") + "/test.mogrt", "overwrite": True}, timeout=180)
+    m = r("exportMogrt", {"comp": "T_Main", "file": os.path.join(OUT, "test.mogrt"), "overwrite": True}, timeout=180)
     check(m["ok"], m)
     r("exportMogrt", {"comp": "T_Main", "file": os.path.join(TMP, "evil.mogrt")}, ok=False)
 
@@ -723,7 +739,7 @@ def _():
 
 @test("render queue add/list/clear + renderPreview")
 def _():
-    a = r("addToRenderQueue", {"comp": "T_Main", "file": os.path.join(HERE, "out") + "/main.mov", "range": [0, 1]})
+    a = r("addToRenderQueue", {"comp": "T_Main", "file": os.path.join(OUT, "main.mov"), "range": [0, 1]})
     check(len(a["outputTemplates"]) > 0, a)
     rq = r("listRQ", {"templates": True})
     check(rq["numItems"] >= 1, rq)
@@ -830,9 +846,231 @@ def _():
     check(r("compInfo", {"comp": "T_Main"})["numLayers"] == n0, "batch undone in one step")
     err = r("batch", {"commands": [{"command": "addNull", "args": {"comp": "T_Main", "name": "B3"}}, {"command": "setProperty", "args": {"comp": "T_Main", "layer": "NOPE", "path": "opacity", "value": 1}}]}, ok=False)
     check("stopped at #2" in err, err)
+    if "rolled back" in err:   # 1.0.5: atomic batch (AE reports project.revision)
+        check(r("compInfo", {"comp": "T_Main"})["numLayers"] == n0, "failed batch rolled back")
+    else:
+        r("menuCommand", {"command": "undo"})
+    # atomic:false keeps the steps before the error
+    err = r("batch", {"atomic": False, "commands": [{"command": "addNull", "args": {"comp": "T_Main", "name": "B4"}}, {"command": "setProperty", "args": {"comp": "T_Main", "layer": "NOPE", "path": "opacity", "value": 1}}]}, ok=False)
+    check("(kept)" in err and layer("T_Main", "B4"), err)
     r("menuCommand", {"command": "undo"})
     r("batch", {"commands": [{"command": "batch", "args": {}}]}, ok=False)
     r("batch", {"commands": [{"command": "saveProject", "args": {"confirm": True}}]}, ok=False)
+
+
+@test("1.0.5: revision, W! flags, render output checks, retime key collisions, bake on paths, audit, doctor/report")
+def _():
+    res, code = aeb.send("ping", {}, 20, PROJECT)
+    check(code == 0 and res["result"].get("os"), res)
+    print("      project.revision reported:", "revision" in res)
+    h = {c["name"]: c for c in r("help", {})["commands"]}
+    check(h["saveProject"].get("undoable") is False and h["cleanupProject"].get("undoable") is False and "undoable" not in h["setProperty"], "W! flags")
+    # render output: extension-aware template, clamp, overwrite guard
+    r("clearRQ", {})
+    q = r("addToRenderQueue", {"comp": "T_Main", "file": "renders/t_rq.mp4", "range": [-1, 999]})
+    check(q["file"].endswith(".mp4") and q["start"] == 0 and q["duration"] <= 10.01, q)
+    try:
+        # an image sequence in a format this AE has a template for (AE 26 has no "PNG Sequence" by default)
+        tpls = q["outputTemplates"]
+        ext = "png" if any("PNG" in t for t in tpls) else ("tif" if any("TIFF" in t for t in tpls) else None)
+        if ext:
+            q2 = r("addToRenderQueue", {"comp": "T_Main", "file": "renders/t_seq." + ext, "range": [0, 1]})
+            check("[#####]" in q2["file"] and q2["file"].endswith("." + ext), q2)
+        if not any("PNG" in t for t in tpls):
+            err = r("addToRenderQueue", {"comp": "T_Main", "file": "renders/t_seq.png", "range": [0, 1]}, ok=False)
+            check("No output template here writes .png" in err, err)
+        r("addToRenderQueue", {"comp": "T_Main", "file": "renders/t_rq.mp4", "outputTemplate": "No Such Template"}, ok=False)
+    finally:
+        r("clearRQ", {})   # never leave items: a later queueInAME would really talk to Media Encoder
+    # retime refuses when keys would collide (flat map segment), nothing changes
+    r("createComp", {"name": "T_Coll", "ifExists": "clear", "duration": 10})
+    r("addNull", {"comp": "T_Coll", "name": "K"})
+    r("addKeyframes", {"comp": "T_Coll", "layer": "K", "path": "opacity", "keys": [{"t": 1, "v": 0}, {"t": 1.2, "v": 50}, {"t": 3, "v": 100}]})
+    m = [[0, 0], [1, 1], [1.5, 1], [10, 9.5]]
+    dry = r("retimeByMap", {"comp": "T_Coll", "map": m, "remapKeys": True, "dryRun": True})
+    check(dry["keyCollisions"], dry)
+    err = r("retimeByMap", {"comp": "T_Coll", "map": m, "remapKeys": True}, ok=False)
+    check("nothing was changed" in err.lower(), err)
+    kk = r("dumpProperty", {"comp": "T_Coll", "layer": "K", "path": "opacity"})
+    check(len(kk.get("k", [])) == 3, kk)
+    # bakeExpression on a shape path: keys written, old ones gone, expression off
+    r("addShape", {"comp": "T_Coll", "name": "SH", "shapes": [{"type": "path", "name": "P", "vertices": [[0, 0], [100, 0], [100, 100]], "closed": True, "fill": "#FFFFFF"}]})
+    pth = "contents/P/Contents/Path 1/Path"
+    r("setExpression", {"comp": "T_Coll", "layer": "SH", "path": pth, "expression": "createPath([[0,0],[100+time*10,0],[100,100]], [], [], true)"})
+    b = r("bakeExpression", {"comp": "T_Coll", "layer": "SH", "path": pth, "range": [0, 1], "step": 5})
+    check(b["keys"] >= 2, b)
+    # audit lists disabled expressions
+    r("setExpression", {"comp": "T_Coll", "layer": "K", "path": "rotation", "expression": "time*10"})
+    r("enableExpressions", {"comp": "T_Coll", "layer": "K", "path": "rotation", "enabled": False})
+    au = r("audit", {"comps": ["T_Coll"]})
+    check(any(d["path"].endswith("Rotation") for d in au["disabledExpressions"]), au["disabledExpressions"])
+    r("deleteItem", {"item": "T_Coll", "force": True})
+    # client support commands (no AE writes)
+    import subprocess
+    d = subprocess.run([sys.executable, os.path.join(HERE, "..", "aeb.py"), "doctor", "--json"], capture_output=True, text=True, timeout=60)
+    check('"checks"' in d.stdout, d.stdout[:300] + d.stderr[:300])
+    rp = subprocess.run([sys.executable, os.path.join(HERE, "..", "aeb.py"), "report", "--out", os.path.join(aeb.ROOT, "report_test.md")], capture_output=True, text=True, timeout=60)
+    check("# BridgeLine bug report" in rp.stdout and os.path.expanduser("~") not in rp.stdout, rp.stdout[:300])
+
+
+@test("1.0.5 frames: wait/flags, clamp, resolution, isolate, review sheet, pixdiff")
+def _():
+    res, code = aeb.send("renderFrames", {"comp": "T_Main", "times": [0.5, 999], "folder": "renders/t105"}, 60, PROJECT)
+    check(code == 0 and res.get("frameCheck", {}).get("ready"), res)
+    fr = res["result"]["frames"]
+    check(fr[1]["time"] < 10 and any("clamped" in w for w in res.get("warnings", [])), res)
+    half = r("renderFrames", {"comp": "T_Main", "time": 0.5, "folder": "renders/t105", "prefix": "half", "resolution": 2})
+    import struct
+    w2 = struct.unpack(">I", open(half["frames"][0]["file"], "rb").read()[16:20])[0]
+    print("      resolution 2 ->", w2, "px wide (comp 1920)")
+    iso = r("renderFrames", {"comp": "T_Main", "time": 0.5, "folder": "renders/t105", "prefix": "iso", "isolate": "TITLE"})
+    check(iso.get("isolated") == "TITLE", iso)
+    check(not any(l.get("solo") for l in r("compInfo", {"comp": "T_Main"})["layers"]), "solo restored")
+    import subprocess, json as _j
+    rv = subprocess.run([sys.executable, os.path.join(HERE, "..", "aeb.py"), "review", "--comp", "T_Main", "--range", "0", "2", "--frames", "6", "--project", PROJECT],
+                        capture_output=True, text=True, timeout=180)
+    rj = _j.loads(rv.stdout)
+    check(rj.get("ok") and os.path.exists(rj["sheet"]) and rj["frames"] == 6, rv.stdout[:400] + rv.stderr[:400])
+    pd = subprocess.run([sys.executable, os.path.join(HERE, "..", "aeb.py"), "pixdiff", fr[0]["file"], iso["frames"][0]["file"]],
+                        capture_output=True, text=True, timeout=60)
+    check(_j.loads(pd.stdout).get("ok"), pd.stdout[:300])
+
+
+@test("1.0.5 text: textLayout, glyphs, font names, menu labels, deep duplicate, resizeComp, fitBox, textsheet")
+def _():
+    c = "T_Txt"
+    r("createComp", {"name": c, "ifExists": "clear", "duration": 4, "width": 1920, "height": 1080})
+    r("addText", {"comp": c, "name": "BOX", "text": "A very long line that cannot fit into such a small box at all, really", "box": [300, 60],
+                  "style": {"font": "Arial Bold", "fontSize": 40}})
+    t = r("textLayout", {"comp": c})
+    lay = t["layers"][0]
+    check(lay["font"] == "Arial-BoldMT", lay)      # "Family Style" resolved to the PostScript name
+    check(lay.get("overflow") is True or "overflow" not in lay, lay)   # overflow needs AE 24.6+
+    print("      textLayout:", {k: lay.get(k) for k in ("lines", "paragraphs", "rewrapped", "overflow")})
+    r("addText", {"comp": c, "name": "BAD", "text": "x", "style": {"font": "No Such Font Family"}}, ok=False)
+    g = r("checkGlyphs", {"font": "Arial", "text": "Hello \u041f\u0440\u0438\u0432\u0456\u0442 \u4f60\u597d"})
+    print("      checkGlyphs Arial:", g)
+    # menu label: Dropdown Menu Control by label
+    r("addNull", {"comp": c, "name": "CTL"})
+    r("addControl", {"comp": c, "layer": "CTL", "type": "dropdown", "name": "Mode", "items": ["One", "Two", "Three"]})
+    r("setProperty", {"comp": c, "layer": "CTL", "path": "effects/Mode/Menu", "value": "Three"})
+    check(close(val(c, "CTL", "effects/Mode/Menu"), 3), "menu by label")
+    dp = r("dumpProperty", {"comp": c, "layer": "CTL", "path": "effects/Mode/Menu"})
+    print("      menu dump:", {k: dp.get(k) for k in ("v", "label", "options")})
+    r("setProperty", {"comp": c, "layer": "CTL", "path": "effects/Mode/Menu", "value": "Four"}, ok=False)
+    # deep duplicate: only precomps with text
+    r("createComp", {"name": "T_TxtInner", "ifExists": "clear", "duration": 4})
+    r("addText", {"comp": "T_TxtInner", "name": "IN", "text": "Inner"})
+    r("createComp", {"name": "T_Plain", "ifExists": "clear", "duration": 4})
+    r("addSolid", {"comp": "T_Plain", "name": "S"})
+    r("addFromItem", {"comp": c, "item": "T_TxtInner"})
+    r("addFromItem", {"comp": c, "item": "T_Plain"})
+    r("addNull", {"comp": c, "name": "EXPR"})
+    r("setExpression", {"comp": c, "layer": "EXPR", "path": "opacity", "expression": 'comp("T_TxtInner").numLayers * 50'})
+    dry = r("duplicateComp", {"comp": c, "deep": "text", "suffix": " UA", "dryRun": True})
+    check(dry["nestedToDuplicate"] == ["T_TxtInner"] and dry["nestedShared"] == ["T_Plain"], dry)
+    d = r("duplicateComp", {"comp": c, "name": "T_Txt UA", "deep": "text", "suffix": " UA"})
+    check(d["duplicated"] == 2 and d.get("expressionsRepointed") == 1, d)
+    names = [l["name"] for l in r("compInfo", {"comp": "T_Txt UA"})["layers"]]
+    check("T_TxtInner UA" in names and "T_Plain" in names, names)
+    # resizeComp keeps content centred
+    r("addSolid", {"comp": "T_Plain", "name": "MARK", "width": 10, "height": 10, "position": [960, 540]})
+    rz = r("resizeComp", {"comp": "T_Plain", "width": 1080, "height": 1920})
+    check(rz["offset"] == [-420, 420] and close(val("T_Plain", "MARK", "position")[0], 540), rz)
+    # fitBox: plate fits text + padding, parented, below it
+    r("addText", {"comp": c, "name": "LABEL", "text": "Label", "position": [400, 800], "style": {"fontSize": 60}})
+    fb = r("fitBox", {"comp": c, "layer": "LABEL", "padding": [30, 15], "color": "#202020"})
+    check(fb["parent"] == "LABEL" and fb["rigged"], fb)
+    sr = r("sourceRect", {"comp": c, "layers": ["LABEL", "LABEL plate"], "time": 1})
+    print("      fitBox:", fb["size"], [x.get("compBounds") for x in sr["layers"]][:2])
+    # textsheet round trip
+    import subprocess, json as _j, csv
+    sheet = os.path.join(aeb.ROOT, "t_sheet.csv")
+    ex = subprocess.run([sys.executable, os.path.join(HERE, "..", "aeb.py"), "textsheet", "export", "--comp", "T_TxtInner UA", "--out", sheet, "--project", PROJECT],
+                        capture_output=True, text=True, timeout=120)
+    check(_j.loads(ex.stdout).get("rows") == 1, ex.stdout[:300] + ex.stderr[:300])
+    rows = list(csv.DictReader(open(sheet, encoding="utf-8-sig")))
+    rows[0]["target"] = "Vnutrishnij"
+    rows[0]["max_chars"] = "20"
+    with open(sheet, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+    ap = subprocess.run([sys.executable, os.path.join(HERE, "..", "aeb.py"), "textsheet", "apply", sheet, "--project", PROJECT],
+                        capture_output=True, text=True, timeout=120)
+    check(_j.loads(ap.stdout).get("applied") == 1, ap.stdout[:400] + ap.stderr[:300])
+    check(r("textLayout", {"comp": "T_TxtInner UA"})["layers"][0]["text"] == "Vnutrishnij", "text applied")
+    for it in ("T_Txt UA", "T_TxtInner UA", c, "T_TxtInner", "T_Plain"):
+        r("deleteItem", {"item": it, "force": True})
+
+
+@test("1.0.5 helpers: offsetValues, reverse, keepValue, splitLayer, batch diff, lintMotion, cameraMove, listBackups")
+def _():
+    c = "T_Help"
+    r("createComp", {"name": c, "ifExists": "clear", "duration": 6, "frameRate": 25})
+    r("addNull", {"comp": c, "name": "N"})
+    r("addKeyframes", {"comp": c, "layer": "N", "path": "position", "keys": [{"t": 0, "v": [100, 100], "ease": "easy"}, {"t": 1, "v": [500, 100], "ease": "easyIn"}]})
+    r("offsetValues", {"comp": c, "layer": "N", "path": "position", "delta": [0, -40]})
+    check(close(val(c, "N", "position", 1)[1], 60) and close(val(c, "N", "position", 0)[1], 60), "offset keys")
+    r("reverseKeyframes", {"comp": c, "layer": "N", "path": "position"})
+    check(close(val(c, "N", "position", 0)[0], 500) and close(val(c, "N", "position", 1)[0], 100), "reversed")
+    r("removeKeyframes", {"comp": c, "layer": "N", "path": "position", "keepValue": "last"})
+    check(close(val(c, "N", "position")[0], 100), "keepValue last")
+    r("addSolid", {"comp": c, "name": "CUT"})
+    sp = r("splitLayer", {"comp": c, "layer": "CUT", "time": 2})
+    check(sp["first"]["id"] != sp["second"]["id"], sp)
+    li = {l["id"]: l for l in r("compInfo", {"comp": c})["layers"]}
+    check(close(li[sp["first"]["id"]]["outPoint"], 2) and close(li[sp["second"]["id"]]["inPoint"], 2), li)
+    bd = r("batch", {"diff": True, "commands": [{"command": "setProperty", "args": {"comp": c, "layer": "N", "path": "opacity", "value": 50}}]})
+    check(bd["diff"]["changedCount"] + bd["diff"]["addedCount"] >= 1, bd["diff"])   # a default value shows up as "added"
+    r("setProperty", {"comp": c, "layer": "N", "path": "rotation", "value": 0, "time": 1.02})
+    lm = r("lintMotion", {"comp": c})
+    check("subframeKey" in lm["byCheck"], lm["byCheck"])
+    r("addCamera", {"comp": c, "name": "CAM"})
+    z0 = val(c, "CAM", "cameraOptions/Zoom")
+    cm = r("cameraMove", {"comp": c, "layer": "CAM", "move": "dollyZoom", "amount": 300, "range": [0, 2]})
+    check(cm.get("zoom") and cm["zoom"][1] < z0, cm)
+    ob = r("cameraMove", {"comp": c, "layer": "CAM", "move": "orbit", "amount": 90, "range": [3, 5], "steps": 8})
+    check(ob["keys"] == 9, ob)
+    lb = r("listBackups", {})
+    check("backups" in lb, lb)
+    r("deleteItem", {"item": c, "force": True})
+
+
+@test("1.0.5 extras: unknown-argument warning, stack, pin, zoomToRect, setPathKeys, placeAudioCues, timeRemap in/out")
+def _():
+    c = "T_Lay"
+    r("createComp", {"name": c, "ifExists": "clear", "duration": 6, "frameRate": 25, "width": 1920, "height": 1080})
+    res, code = aeb.send("addNull", {"comp": c, "name": "W", "postion": [10, 10]}, 30, PROJECT)
+    check(code == 0 and any("Did you mean 'position'" in w for w in res.get("warnings", [])), res.get("warnings"))
+    res, code = aeb.send("compInfoo", {"comp": c}, 30, PROJECT)
+    check(code == 1 and "compInfo" in res.get("error", ""), res)
+    for n, h in (("A", 100), ("B", 60), ("C", 140)):
+        r("addSolid", {"comp": c, "name": n, "width": 300, "height": h, "position": [500 + h, 300]})
+    st = r("stack", {"comp": c, "layers": ["A", "B", "C"], "gap": 20, "align": "start"})
+    sr = {x["name"]: x["compBounds"] for x in r("sourceRect", {"comp": c, "layers": ["A", "B", "C"]})["layers"]}
+    check(close(sr["B"]["top"], sr["A"]["bottom"] + 20) and close(sr["C"]["top"], sr["B"]["bottom"] + 20) and close(sr["C"]["left"], sr["A"]["left"]), sr)
+    r("pin", {"comp": c, "layer": "C", "edge": "bottomRight", "margin": 40})
+    b = r("sourceRect", {"comp": c, "layer": "C"})["layers"][0]["compBounds"]
+    check(close(b["right"], 1880) and close(b["bottom"], 1040), b)
+    z = r("zoomToRect", {"comp": c, "target": "B", "range": [1, 2], "fill": 0.5})
+    check(z["layersParented"] >= 3, z)
+    bz = r("sourceRect", {"comp": c, "layer": "B", "time": 2})["layers"][0]["compBounds"]
+    check(abs((bz["left"] + bz["right"]) / 2 - 960) < 2 and abs((bz["top"] + bz["bottom"]) / 2 - 540) < 2, bz)
+    r("addShape", {"comp": c, "name": "ROTO", "shapes": [{"type": "path", "name": "P", "vertices": [[0, 0], [10, 0], [10, 10]], "closed": True}]})
+    pk = r("setPathKeys", {"comp": c, "layer": "ROTO", "path": "contents/P/Contents/Path 1", "fps": 25, "clear": True,
+                           "keys": [{"frame": 0, "vertices": [[0, 0], [100, 0], [100, 100]]}, {"frame": 25, "vertices": [[0, 0], [200, 0], [200, 200]]}]})
+    check(pk["keys"] == 2 and close(pk["to"], 1), pk)
+    dry = r("placeAudioCues", {"comp": c, "dryRun": True, "cues": [{"t": 1, "file": os.path.join(ASSETS, "voice.wav"), "level": -6}]})
+    check(dry["dryRun"] and len(dry["cues"]) == 1, dry)
+    r("placeAudioCues", {"comp": c, "cues": [{"t": 1, "file": os.path.join(ASSETS, "voice.wav")}, {"t": 99, "file": "/nope.wav"}]}, ok=False)
+    pc = r("placeAudioCues", {"comp": c, "cues": [{"t": 1, "file": os.path.join(ASSETS, "voice.wav"), "name": "SFX1", "level": -6}]})
+    check(pc["placed"] == 1, pc)
+    check(close(val(c, "SFX1", "audioLevels")[0], -6), "audio level")
+    r("addFromItem", {"comp": c, "item": "clip.mp4", "name": "CLIP"})
+    li = layer(c, "CLIP")
+    r("setTiming", {"comp": c, "layer": "CLIP", "outPoint": 2})
+    r("timeRemap", {"comp": c, "layer": "CLIP", "freezeAt": 0.5})
+    check(close(layer(c, "CLIP")["outPoint"], 2), "timeRemap keeps out point: %s" % layer(c, "CLIP"))
+    r("deleteItem", {"item": c, "force": True})
 
 
 PHASE[0] = "edge"
@@ -845,6 +1083,7 @@ def _():
     check(m["newLayers"], m)
     r("cleanupProject", {"action": "consolidateFootage", "confirm": True})
     r("cleanupProject", {"action": "nonsense", "confirm": True}, ok=False)
+    r("clearRQ", {})                    # with an empty queue queueInAME must refuse (and never contact Media Encoder)
     r("queueInAME", {}, ok=False)
 
 
@@ -887,6 +1126,7 @@ def _():
 
 def main():
     phases = sys.argv[1:] or ["setup", "layers", "props", "fx", "project", "read", "edge"]
+    print("Test project:", PROJECT)
     t0 = time.time()
     for ph in phases:
         print("\n=====", ph)

@@ -30,13 +30,19 @@ def("addAdjustment", { w: 1 }, "Add adjustment layer. args: comp + common", func
     return created(c, l);
 });
 
-def("addText", { w: 1 }, "Add text. args: comp, text (string or lines[]), [box:[w,h]], [style:{font,fontSize,fillColor,justification,tracking,leading,...}] + common", function (a) {
+def("addText", { w: 1 }, "Add text. Starts with neutral tracking/scale/baseline/faux (not the Character panel's) unless inheritCharacterPanel:true. style.font may be a PostScript name, 'Family Style' or 'Family'. args: comp, text (string or lines[]), [box:[w,h]], [style:{font,fontSize,fillColor,justification,tracking,leading,...}], [inheritCharacterPanel] + common", function (a) {
     var c = getComp(a.comp), txt = isArr(a.text) ? a.text.join("\r") : String(a.text === undefined ? "Text" : a.text);
     var l = a.box ? c.layers.addBoxText(a.box, txt) : c.layers.addText(txt);
-    if (a.style) {
+    // a new text layer takes tracking, scale, baseline shift and faux styles from the Character panel; start neutral
+    // unless asked otherwise (inheritCharacterPanel:true keeps the panel's settings)
+    var st = {}, k, neutral = { tracking: 0, baselineShift: 0, horizontalScale: 100, verticalScale: 100, fauxBold: false, fauxItalic: false };
+    if (a.inheritCharacterPanel !== true) for (k in neutral) if (has(neutral, k)) st[k] = neutral[k];
+    if (a.style) for (k in a.style) if (has(a.style, k)) st[k] = a.style[k];
+    if (keysOf(st).length) {
         var p = l.property("ADBE Text Properties").property("ADBE Text Document"), d = p.value;
-        styleApply(d, a.style);
+        styleApply(d, st);
         p.setValue(d);
+        checkJustification(l, d.justification, function () { return p.value; }, function (x) { p.setValue(x); });
     }
     applyLayerCommon(c, l, a);
     return created(c, l);
@@ -207,6 +213,15 @@ def("copyLayerToComp", { w: 1 }, "Copy layer(s) to another comp (goes on top the
         r.push(created(dest, nl));
     }
     return r;
+});
+
+def("splitLayer", { w: 1 }, "Cut a layer at a time into two (like Edit > Split Layer): the original ends there, a duplicate starts there. args: comp, layer, time", function (a) {
+    var c = getComp(a.comp), l = getLayer(c, a.layer), t = parseTime(a.time, c.frameRate);
+    if (t <= l.inPoint + 1e-6 || t >= l.outPoint - 1e-6) fail("time " + rnd(t) + " is not inside the layer (" + rnd(l.inPoint) + " - " + rnd(l.outPoint) + ")");
+    var d;
+    withUnlocked(l, function (x) { d = x.duplicate(); x.outPoint = t; });
+    withUnlocked(d, function (x) { x.inPoint = t; });
+    return { first: lref(l), second: lref(d), at: rnd(t) };
 });
 
 def("setTiming", { w: 1 }, "Timing. args: comp, layer(s), [startTime], [inPoint], [outPoint], [duration] (out = in + duration), [shift] delta for startTime, [stretch]", function (a) {

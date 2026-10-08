@@ -101,18 +101,67 @@ function keyedProps(l, a) {
     return all;
 }
 
-def("removeKeyframes", { w: 1 }, "Remove keys. args: comp, layer(s), [path|paths] (default: all keyed props), and [times]|[range:[t0,t1]]|[indexes]|[selectedKeys]|[all] (default all)", function (a) {
+def("removeKeyframes", { w: 1 }, "Remove keys. args: comp, layer(s), [path|paths] (default: all keyed props), and [times]|[range:[t0,t1]]|[indexes]|[selectedKeys]|[all] (default all), [keepValue] when the last key goes: 'first'|'last'|'current' (AE default: the value under the time indicator)|a value", function (a) {
     var c = getComp(a.comp), ls = getLayers(c, a), n = 0;
     for (var i = 0; i < ls.length; i++) {
         var ps = keyedProps(ls[i], a);
         withUnlocked(ls[i], function () {
             for (var j = 0; j < ps.length; j++) {
-                var ids = keySelector(ps[j], a, c);
-                for (var k = ids.length - 1; k >= 0; k--) { ps[j].removeKey(ids[k]); n++; }
+                var p = ps[j], ids = keySelector(p, a, c), keep = undefined;   // ES3: var does not reset per iteration
+                if (a.keepValue !== undefined && ids.length === p.numKeys && p.numKeys) {
+                    if (a.keepValue === "first") keep = p.keyValue(1);
+                    else if (a.keepValue === "last") keep = p.keyValue(p.numKeys);
+                    else if (a.keepValue !== "current") keep = valIn(p, a.keepValue);
+                }
+                for (var k = ids.length - 1; k >= 0; k--) { p.removeKey(ids[k]); n++; }
+                if (keep !== undefined && p.numKeys === 0) p.setValue(keep);
             }
         });
     }
     return { removed: n };
+});
+
+def("offsetValues", { w: 1 }, "Add a delta to a property's value - to every selected key (timing and easing stay) or to the static value. 'Move it 40 px up' = delta [0,-40] on position. args: comp, layer(s)|match|selected, path, delta (number or array), and key filter [times]|[range]|[indexes]|[selectedKeys] (default all keys)", function (a) {
+    var c = getComp(a.comp), ls = getLayers(c, a), out = [];
+    if (a.delta === undefined) fail("delta is required");
+    function add(v, d) {
+        if (isArr(v)) { var r = v.slice(0); for (var i = 0; i < r.length; i++) r[i] += isArr(d) ? (d[i] || 0) : d; return r; }
+        return v + (isArr(d) ? d[0] : d);
+    }
+    for (var i = 0; i < ls.length; i++) {
+        var p = resolveProp(ls[i], a.path), n = 0;
+        if (typeof p.value !== "number" && !isArr(p.value)) fail("offsetValues works on numbers and arrays, not on " + propPath(p));
+        withUnlocked(ls[i], function () {
+            if (p.numKeys) { var ids = keySelector(p, a, c); for (var k = 0; k < ids.length; k++) { p.setValueAtKey(ids[k], add(p.keyValue(ids[k]), a.delta)); n++; } }
+            else { p.setValue(add(p.value, a.delta)); n = 1; }
+        });
+        out.push({ layer: lref(ls[i]), path: propPath(p), changed: n, keyed: p.numKeys > 0 });
+    }
+    return out;
+});
+
+def("reverseKeyframes", { w: 1 }, "Reverse keys in time (mirror inside their span, easing and spatial tangents swapped). args: comp, layer(s), [path|paths] (default all keyed props), key filter [range]|[times]|[indexes]|[selectedKeys] (default all)", function (a) {
+    var c = getComp(a.comp), ls = getLayers(c, a), n = 0;
+    for (var i = 0; i < ls.length; i++) {
+        var ps = keyedProps(ls[i], a);
+        withUnlocked(ls[i], function () {
+            for (var j = 0; j < ps.length; j++) {
+                var p = ps[j], ids = keySelector(p, a, c), caps = [], k;
+                if (ids.length < 2) continue;
+                for (k = 0; k < ids.length; k++) caps.push(keyCapture(p, ids[k]));
+                var t0 = caps[0].t, t1 = caps[caps.length - 1].t;
+                for (k = ids.length - 1; k >= 0; k--) p.removeKey(ids[k]);
+                for (k = 0; k < caps.length; k++) {
+                    var cp = caps[k], sw = {};
+                    for (var f in cp) if (has(cp, f)) sw[f] = cp[f];
+                    sw.ei = cp.eo; sw.eo = cp.ei; sw.ii = cp.oi; sw.oi = cp.ii; sw.sti = cp.sto; sw.sto = cp.sti;
+                    keyRestore(p, sw, t0 + t1 - cp.t);
+                }
+                n += caps.length;
+            }
+        });
+    }
+    return { reversed: n };
 });
 
 def("moveKeyframes", { w: 1 }, "Move keys in time. args: comp, layer(s), [path|paths] (default all keyed props), delta seconds, and optional key filter [range]|[times]|[indexes]|[selectedKeys]", function (a) {
@@ -211,12 +260,29 @@ def("bakeExpression", { w: 1 }, "Convert expression to keys. args: comp, layer, 
     var t0 = a.range ? a.range[0] : Math.max(0, l.inPoint), t1 = a.range ? a.range[1] : Math.min(c.duration, l.outPoint);
     var step = c.frameDuration * num(a.step, 1), times = [], vals = [];
     for (var t = t0; t <= t1 + 1e-6; t += step) { times.push(t); vals.push(p.valueAtTime(t, false)); }
+    var mode = "setValuesAtTimes";
     withUnlocked(l, function () {
-        if (a.keepExpression === false) p.expression = ""; else p.expressionEnabled = false;
-        for (var k = p.numKeys; k >= 1; k--) p.removeKey(k);
-        p.setValuesAtTimes(times, vals);
+        var oldTimes = [], k, i;
+        for (k = 1; k <= p.numKeys; k++) oldTimes.push(p.keyTime(k));
+        var expr = p.expression;
+        p.expressionEnabled = false;
+        // write the new keys first; only then remove the old ones (setValuesAtTimes is not supported on every
+        // property type - e.g. paths in some AE versions - and must not leave the property without keys)
+        try { p.setValuesAtTimes(times, vals); }
+        catch (e1) {
+            mode = "setValueAtTime";
+            try { for (i = 0; i < times.length; i++) p.setValueAtTime(times[i], vals[i]); }
+            catch (e2) { p.expression = expr; p.expressionEnabled = true; fail("Cannot write keys on " + propPath(p) + ": " + errStr(e2) + ". Nothing was changed."); }
+        }
+        var tol = c.frameDuration / 4;
+        for (k = p.numKeys; k >= 1; k--) {
+            var kt = p.keyTime(k), isNew = false;
+            for (i = 0; i < times.length && !isNew; i++) if (Math.abs(times[i] - kt) < tol) isNew = true;
+            if (!isNew) p.removeKey(k);
+        }
+        if (a.keepExpression === false) p.expression = "";
     });
-    return { path: propPath(p), keys: times.length };
+    return { path: propPath(p), keys: p.numKeys, written: times.length, mode: mode };
 });
 
 def("addProperty", { w: 1 }, "Generic: add a property/group into an indexed group (effect, mask, shape item, text animator, selector, layer style...). args: comp, layer(s), parent path (e.g. 'effects', 'contents', 'contents/Group 1/Contents'), matchName, [name], [values:{childPath:value}], [expressions:{childPath:expr}], [index]", function (a) {
@@ -296,10 +362,12 @@ def("addControl", { w: 1 }, "Expression control effect. args: comp, layer, type 
     var r;
     withUnlocked(l, function () {
         var fx = l.property("ADBE Effect Parade"), e = fx.addProperty(mn), ix = e.propertyIndex;
-        if (a.name) e.name = a.name;
-        if (a.type === "dropdown" && a.items) {
+        // Dropdown: setPropertyParameters rebuilds the effect and drops a custom name (AE 26+), so set the
+        // items first, fetch the effect again by index, and only then name it.
+        if (String(a.type).toLowerCase() === "dropdown" && a.items) {
             fx.property(ix).property(1).setPropertyParameters(a.items);
         }
+        if (a.name) fx.property(ix).name = a.name;
         if (a.value !== undefined) setPropValue(fx.property(ix).property(1), a.value);
         var ef = fx.property(ix);
         r = { layer: lref(l), effect: ef.name, path: propPath(ef.property(1)), expressionRef: exprRef(c, l, ef.property(1)) };
@@ -344,8 +412,11 @@ def("timeRemap", { w: 1 }, "Time remapping. args: comp, layer(s), [enable=true],
         withUnlocked(l, function () {
             if (a.enable === false) { l.timeRemapEnabled = false; return; }
             if (!l.canSetTimeRemapEnabled) fail("Time remap not possible on " + l.name);
+            var wasOn = l.timeRemapEnabled, io = [l.inPoint, l.outPoint];
             l.timeRemapEnabled = true;
-            var p = l.property("ADBE Time Remapping"), keep = [], j, k;
+            // enabling Time Remap resets the out point to the end of the source: put the layer's in/out back (out first)
+            if (!wasOn) { try { l.outPoint = io[1]; l.inPoint = io[0]; } catch (eo) { warn("in/out of " + l.name + " not restored: " + errStr(eo)); } }
+            var p = l.property("ADBE Time Remapping") || l.timeRemap, keep = [], j, k;   // audio layers: only the shortcut works
             var newKeys = a.keys || (a.freezeAt !== undefined ? [{ t: l.inPoint, v: a.freezeAt, interp: "hold" }] : []);
             if (newKeys.length) {
                 // AE does not allow an empty Time Remap: add new keys first, then remove the old ones

@@ -2,11 +2,18 @@
 
 def("ping", {}, "Bridge/AE/project status.", function (a) {
     var r = {
-        bridge: RB.VERSION, ae: app.version, project: app.project.file ? app.project.file.fsName : null,
+        bridge: RB.VERSION, ae: app.version, os: $.os, aeLanguage: app.isoLanguage,
+        project: app.project.file ? app.project.file.fsName : null,
         numItems: app.project.numItems, allowWrites: RB.allowWrites(), bridgeFolder: RB.root,
         allowedWriteRoots: allowedRoots(), time: stamp()
     };
     try { r.dirty = app.project.dirty; } catch (e) {}
+    // self-check of the unknown-argument warning (a sample with a typo must produce one warning)
+    try {
+        var w0 = RB.warnings.length, warned = checkArgs("addNull", { postion: 1 });
+        RB.warnings.length = w0;
+        r.argsCheck = { table: !!RB.ARGS, commands: RB.ARGS ? keysOf(RB.ARGS).length : 0, warned: warned };
+    } catch (e) { r.argsCheck = "error: " + errStr(e); }
     try { if (app.project.activeItem) r.activeItem = iref(app.project.activeItem); } catch (e) {}
     return r;
 });
@@ -18,7 +25,9 @@ def("help", {}, "List commands. args: [filter] regex on name/doc, [writeOnly], [
         if (re && !re.test(names[i]) && !re.test(c.doc)) continue;
         if (a.writeOnly && !c.w) continue;
         if (a.readOnly && c.w) continue;
-        r.push({ name: names[i], write: c.w, doc: c.doc });
+        var o = { name: names[i], write: !!c.w, doc: c.doc };
+        if (c.w && (c.noUndo || c.irreversible)) o.undoable = false; // Cmd+Z cannot take it back (save, render, menu, cleanup...)
+        r.push(o);
     }
     return { count: r.length, commands: r };
 });
@@ -225,7 +234,7 @@ def("listEffects", {}, "Installed effects. args: [match] regex on name/matchName
     return outResult(a, { count: r.length, effects: r });
 });
 
-def("renderFrames", {}, "Save comp frames as PNG. args: comp, [time]|[times]|[range:[start,end], step]|[markers:true], [folder] (default bridge/renders), [prefix]", function (a) {
+def("renderFrames", {}, "Save comp frames as PNG. Times outside the comp are clamped to its first/last frame. args: comp, [time]|[times]|[range:[start,end], step]|[markers:true], [folder] (default bridge/renders), [prefix], [isolate] layer(s) to render alone (solo, restored after; needs Allow changes), [resolution] 1|2|3|4 = full/half/third/quarter (restored after; needs Allow changes). The client (aeb.py) waits until every PNG is complete and flags empty / identical frames.", function (a) {
     var c = getComp(a.comp), times = [], i;
     if (a.times) times = a.times;
     else if (a.markers) { var mk = c.markerProperty; for (i = 1; i <= mk.numKeys; i++) times.push(mk.keyTime(i)); }
@@ -234,15 +243,50 @@ def("renderFrames", {}, "Save comp frames as PNG. args: comp, [time]|[times]|[ra
     if (times.length > 200) fail("Too many frames (" + times.length + "), max 200");
     var folder = safeOut((a.folder || "renders") + "/x.png");
     folder = new File(folder).parent.fsName;
-    var out = [];
-    for (i = 0; i < times.length; i++) {
-        var tt = parseTime(times[i], c.frameRate);
-        var name = (a.prefix || safeName(c.name)) + "_" + pad(Math.round(tt * 1000), 6) + "ms.png";
-        var f = new File(folder + "/" + name);
-        c.saveFrameToPng(tt, f);
-        out.push({ time: rnd(tt), file: f.fsName });
+    var iso = a.isolate !== undefined && a.isolate !== null, res = num(a.resolution, 1);
+    if ((iso || res !== 1) && !RB.allowWrites()) fail("isolate / resolution change the comp for the capture (restored after) and need 'Allow changes'");
+    if (res !== 1 && (res < 1 || res > 4 || Math.round(res) !== res)) fail("resolution must be 1, 2, 3 or 4");
+    var solos = [], keepRes = c.resolutionFactor, out = [], clamped = 0, last = c.duration - c.frameDuration;
+    if (iso || res !== 1) app.beginUndoGroup("BridgeLine: renderFrames (temporary)");
+    try {
+        if (iso) {
+            var keep = getLayers(c, { layers: isArr(a.isolate) ? a.isolate : [a.isolate] }), ids = {};
+            for (i = 0; i < keep.length; i++) ids[keep[i].id] = 1;
+            for (i = 1; i <= c.numLayers; i++) {
+                var l = c.layer(i);
+                solos.push([l, l.solo]);
+                var want = !!ids[l.id];
+                if (l.solo !== want) withUnlocked(l, function (x) { try { x.solo = want; } catch (e) {} });
+            }
+        }
+        if (res !== 1) c.resolutionFactor = [res, res];
+        for (i = 0; i < times.length; i++) {
+            var tt = parseTime(times[i], c.frameRate);
+            if (tt > last) { tt = last; clamped++; } else if (tt < 0) { tt = 0; clamped++; }
+            var name = (a.prefix || safeName(c.name)) + "_" + pad(Math.round(tt * 1000), 6) + "ms.png";
+            var f = new File(folder + "/" + name);
+            c.saveFrameToPng(tt, f);
+            out.push({ time: rnd(tt), file: f.fsName });
+        }
+    } finally {
+        for (i = 0; i < solos.length; i++) { var sl = solos[i]; if (sl[0].solo !== sl[1]) withUnlocked(sl[0], function (x) { try { x.solo = sl[1]; } catch (e) {} }); }
+        if (res !== 1) try { c.resolutionFactor = keepRes; } catch (e) {}
+        if (iso || res !== 1) app.endUndoGroup();
     }
-    return { count: out.length, frames: out };
+    if (clamped) warn(clamped + " time(s) outside the comp were clamped to its first/last frame (" + rnd(last) + " s)");
+    var r = { count: out.length, frames: out };
+    // colour management: with OCIO the PNGs are written in the working space and look darker / flatter than the viewer
+    try {
+        var cms = app.project.colorManagementSystem;
+        if (cms !== undefined) {
+            r.colorManagement = (cms === 1) ? "OCIO" : "Adobe";
+            try { r.workingSpace = app.project.workingSpace; } catch (e3) {}
+            if (cms === 1) warn("Project uses OCIO colour management: PNGs are in the working space and can look darker than the viewer. Judge layout and timing, not colour.");
+        }
+    } catch (e4) {}
+    if (res !== 1) r.resolution = "1/" + res;
+    if (iso) r.isolated = a.isolate;
+    return r;
 });
 
 def("valueAtTime", {}, "Evaluated value(s). args: comp, layer, path, [time]|[times], [preExpression]", function (a) {
@@ -384,6 +428,24 @@ function flattenDump(d, map) {
         if (l.props) props(lp, l.props);
     }
 }
+// full dump of a comp in the snapshot format (comp settings + every layer with keys and eases)
+function compFull(c) {
+    var r = compOut(c), o = dumpOpts({ ease: true }, c);
+    r.layers = [];
+    for (var j = 1; j <= c.numLayers; j++) r.layers.push(layerOut(c.layer(j), o));
+    return r;
+}
+function flatDiff(before, after, limit) {
+    var changed = [], added = [], removed = [], k;
+    for (k in before) {
+        if (!has(before, k)) continue;
+        if (!has(after, k)) removed.push(k);
+        else if (after[k] !== before[k]) changed.push({ key: k, before: shorten(before[k], 400), after: shorten(after[k], 400) });
+    }
+    for (k in after) if (has(after, k) && !has(before, k)) added.push(k + " = " + shorten(after[k], 200));
+    return { changedCount: changed.length, addedCount: added.length, removedCount: removed.length,
+             changed: changed.slice(0, limit), added: added.slice(0, limit), removed: removed.slice(0, limit) };
+}
 def("snapshot", {}, "Save a JSON snapshot of comps for later diff. args: [comps|comp|compMatch], [name] (default: first comp name)", function (a) {
     var comps = getComps(a, false), dumps = [];
     for (var i = 0; i < comps.length; i++) {
@@ -405,35 +467,30 @@ def("diff", {}, "Compare current state with a snapshot. args: name, [limit=300]"
         flattenDump(snap.comps[i], before);
         var c = null;
         try { c = getComp(snap.comps[i].id); } catch (e) {}
-        if (c) {
-            var r = compOut(c), o = dumpOpts({ ease: true }, c);
-            r.layers = [];
-            for (var j = 1; j <= c.numLayers; j++) r.layers.push(layerOut(c.layer(j), o));
-            flattenDump(r, after);
-        }
+        if (c) flattenDump(compFull(c), after);
     }
-    var changed = [], added = [], removed = [], limit = num(a.limit, 300), k;
-    for (k in before) {
-        if (!has(before, k)) continue;
-        if (!has(after, k)) removed.push(k);
-        else if (after[k] !== before[k]) changed.push({ key: k, before: shorten(before[k], 400), after: shorten(after[k], 400) });
-    }
-    for (k in after) if (has(after, k) && !has(before, k)) added.push(k + " = " + shorten(after[k], 200));
-    return {
-        snapshot: snap.created, changedCount: changed.length, addedCount: added.length, removedCount: removed.length,
-        changed: changed.slice(0, limit), added: added.slice(0, limit), removed: removed.slice(0, limit)
-    };
+    var d = flatDiff(before, after, num(a.limit, 300));
+    d.snapshot = snap.created;
+    return d;
 });
 
 // ---------------------------------------------------------------- audit
-def("audit", {}, "Project problems report: missing footage/fonts, expression errors, texts outside frame/safe area, empty comps, unused items, layers outside comp time, missing effects. args: [comps|compMatch], [safe=0.9] title-safe ratio, [limit=100]", function (a) {
+def("audit", {}, "Project problems report: missing footage/fonts (also files deleted from disk after import), fonts without glyphs for the layer's text (AE 25.1+), box text that overflows (AE 24.6+), expression errors, disabled expressions (AE disables one that errors), texts outside frame/safe area, empty comps, unused items, layers outside comp time, missing effects. args: [comps|compMatch], [safe=0.9] title-safe ratio, [limit=100]", function (a) {
     var limit = num(a.limit, 100), safe = num(a.safe, 0.9), comps = getComps(a, true), i, j;
-    var r = { missingFootage: [], unusedItems: [], emptyComps: [], expressionErrors: [], textOutsideFrame: [], textOutsideSafe: [], layersOutsideCompTime: [], missingEffects: [] };
+    var r = { missingFootage: [], unusedItems: [], emptyComps: [], expressionErrors: [], disabledExpressions: [], missingGlyphs: [], textOverflow: [], textOutsideFrame: [], textOutsideSafe: [], layersOutsideCompTime: [], missingEffects: [] };
     function push(list, v) { if (list.length < limit) list.push(v); }
     for (i = 1; i <= app.project.numItems; i++) {
         var it = app.project.item(i);
         if (it instanceof FootageItem) {
             if (it.footageMissing) push(r.missingFootage, iref(it));
+            else {
+                // footageMissing stays false for a file deleted after import until the project is reopened
+                try {
+                    if (it.mainSource instanceof FileSource && it.file && !it.file.exists) {
+                        var mf = iref(it); mf.reason = "file not on disk: " + it.file.fsName; push(r.missingFootage, mf);
+                    }
+                } catch (e) {}
+            }
             if (!it.usedIn.length) push(r.unusedItems, iref(it));
         }
     }
@@ -453,9 +510,21 @@ def("audit", {}, "Project problems report: missing footage/fonts, expression err
                     if (p.canSetExpression && p.expression !== "" && p.expressionEnabled) {
                         var err = exprEval(p);
                         if (err) push(r.expressionErrors, { where: where, path: propPath(p), error: err });
+                    } else if (p.canSetExpression && p.expression !== "" && !p.expressionEnabled) {
+                        var de = { where: where, path: propPath(p) };
+                        try { if (p.expressionError) de.error = p.expressionError; } catch (e2) {}
+                        push(r.disabledExpressions, de);
                     }
                 } catch (e) {}
             });
+            if (l instanceof TextLayer) {
+                // fonts that cannot show the layer's characters (Cyrillic in a Latin-only font...), AE 25.1+
+                try {
+                    var td = textProp(l).value, mg = missingGlyphs(td.font, td.text);
+                    if (mg.length) push(r.missingGlyphs, { where: where, font: td.font, missing: mg.join("") });
+                    if (td.boxText && td.boxOverflow) push(r.textOverflow, { where: where, box: rnd(td.boxTextSize) });
+                } catch (e) {}
+            }
             if (l instanceof TextLayer && l.enabled) {
                 var t = Math.max(l.inPoint, Math.min(c.duration, l.outPoint) - c.frameDuration);
                 t = Math.max(0, Math.min(t, (l.inPoint + Math.min(l.outPoint, c.duration)) / 2));
@@ -473,6 +542,49 @@ def("audit", {}, "Project problems report: missing footage/fonts, expression err
     } catch (e) { r.missingFonts = "not available in this AE version"; }
     r.note = "Bounds are approximate (2D transforms incl. parents; 3D, auto-orient and effects are ignored).";
     return outResult(a, r);
+});
+
+def("lintMotion", {}, "Motion checks a reviewer would make, each with a time to look at (read-only): keys between frames, one-frame jumps without motion blur, linear transform keys, text on screen shorter than its reading time, rotation turning more than 180 deg between keys, solo left on, comp not at full resolution / Draft 3D. args: comp, [layers|match], [cps=15] reading speed chars/s, [limit=100]", function (a) {
+    var c = getComp(a.comp), ls = (a.layer || a.layers || a.match) ? getLayers(c, a) : null, fd = c.frameDuration, out = [];
+    var limit = num(a.limit, 100), cps = num(a.cps, 15), i, k;
+    function add(sev, check, l, t, detail) { if (out.length < limit) out.push({ severity: sev, check: check, layer: l ? l.name : null, time: t === null ? null : rnd(t), detail: detail }); }
+    if (!ls) { ls = []; for (i = 1; i <= c.numLayers; i++) ls.push(c.layer(i)); }
+    try { if (c.resolutionFactor[0] !== 1 || c.resolutionFactor[1] !== 1) add("warn", "resolution", null, null, "comp resolution is 1/" + c.resolutionFactor[0] + " (renders and previews are softer)"); } catch (e) {}
+    try { if (c.draft3d) add("warn", "draft3d", null, null, "Draft 3D is on"); } catch (e) {}
+    for (i = 0; i < ls.length; i++) {
+        var l = ls[i];
+        if (l.solo) add("warn", "solo", l, null, "solo is on - other layers are hidden in renders");
+        var mb = false; try { mb = l.motionBlur && c.motionBlur; } catch (e) {}
+        if (l instanceof TextLayer && l.enabled) {
+            try {
+                var txt = String(textProp(l).value.text).replace(/\s+/g, " "), need = txt.length / cps, vis = Math.min(l.outPoint, c.duration) - Math.max(l.inPoint, 0);
+                if (txt.length > 3 && vis > 0 && vis < need) add("warn", "readingTime", l, Math.max(l.inPoint, 0), "on screen " + rnd(vis) + " s, reading needs ~" + rnd(need) + " s (" + txt.length + " chars at " + cps + "/s)");
+            } catch (e) {}
+        }
+        walkProps(l, function (p) {
+            try {
+                if (!p.numKeys) return;
+                var tr = propPath(p).indexOf("Transform/") === 0, linear = 0;
+                for (k = 1; k <= p.numKeys; k++) {
+                    var t = p.keyTime(k), fr = t / fd;
+                    if (Math.abs(fr - Math.round(fr)) > 0.01) add("info", "subframeKey", l, t, propPath(p) + " key " + k + " is between frames");
+                    if (k > 1) {
+                        var dt = t - p.keyTime(k - 1), v0 = p.keyValue(k - 1), v1 = p.keyValue(k);
+                        if (dt <= fd * 1.01 && !mb && p.propertyValueType !== PropertyValueType.TEXT_DOCUMENT && p.propertyValueType !== PropertyValueType.SHAPE) {
+                            var big = isArr(v1) ? Math.abs(v1[0] - v0[0]) + Math.abs(v1[1] - v0[1]) > 50 : Math.abs(v1 - v0) > (/Opacity/.test(p.name) ? 50 : 30);
+                            if (big) add("info", "oneFrameJump", l, t, propPath(p) + " jumps in one frame without motion blur");
+                        }
+                        if (/Rotation/.test(p.name) && typeof v1 === "number" && Math.abs(v1 - v0) > 180) add("info", "longRotation", l, t, propPath(p) + " turns " + rnd(Math.abs(v1 - v0)) + " deg between keys");
+                    }
+                    if (tr && p.keyInInterpolationType(k) === KeyframeInterpolationType.LINEAR && p.keyOutInterpolationType(k) === KeyframeInterpolationType.LINEAR && k > 1 && k < p.numKeys) linear++;
+                }
+                if (tr && linear) add("info", "linearKeys", l, p.keyTime(2), propPath(p) + ": " + linear + " inner key(s) linear - motion may look mechanical");
+            } catch (e) {}
+        });
+    }
+    var counts = {};
+    for (i = 0; i < out.length; i++) counts[out[i].check] = (counts[out[i].check] || 0) + 1;
+    return { comp: c.name, findings: out.length, byCheck: counts, items: out };
 });
 
 def("checkTextOverlap", {}, "Text layers whose bounding box overlaps other visible layers. args: comp, [time]|[times], [ignore] regex of layer names, [maxCover=0.9] ignore layers covering more than this share of frame", function (a) {

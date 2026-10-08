@@ -1,0 +1,31 @@
+name: Bug report
+description: Something does not work in BridgeLine
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The quickest way: ask your AI agent "prepare a BridgeLine bug report" (it runs `python3 aeb.py report`)
+        and paste the result below. Names, texts and paths are replaced by placeholders; please read it before sending.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you or your agent asked for, what you expected, what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Output of `aeb.py report`
+      render: markdown
+  - type: input
+    id: versions
+    attributes:
+      label: Versions (if there is no report)
+      placeholder: BridgeLine 1.0.5, After Effects 26.5, macOS 15 / Windows 11
+  - type: input
+    id: agent
+    attributes:
+      label: AI agent
+      placeholder: Claude Code / Codex / Gemini CLI / ...

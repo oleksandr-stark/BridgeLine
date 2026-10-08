@@ -59,8 +59,39 @@ RB.checkUpdateNote = function () {
     try { RB.ui.win.layout.layout(true); } catch (e2) {}
 };
 
+// ---------------------------------------------------------------- heartbeat / per-command results
+// status/<AE version>.json: what this panel is doing, so the client can explain a silence (closed, read-only, busy with X,
+// frozen by a dialog) and route a command to the AE that has the project open without waiting.
+// results/<id>.json: every result kept by id (last 100), so a late answer is not lost when the next command overwrites result.json.
+RB.statusPath = RB.root + "/status/" + safeName(app.version) + ".json";
+RB.statusTicks = 0;
+RB.busyCmd = null; RB.busySince = null;
+RB.writeStatus = function () {
+    try {
+        var st = { panel: RB.VERSION, ae: app.version, time: new Date().getTime(), listen: !!(RB.ui && RB.ui.listen.value),
+                   allowChanges: RB.allowWrites(), project: app.project.file ? app.project.file.fsName : null,
+                   busy: RB.busyCmd, busySince: RB.busySince, root: RB.root };
+        writeAtomic(RB.statusPath, jsonStr(st));
+    } catch (e) {}
+};
+RB.keepResult = function (res) {
+    if (!res || !res.id) return;
+    try {
+        writeText(RB.root + "/results/" + safeName(res.id) + ".json", jsonStr(res, " "));
+        if (++RB.keptCount % 25 === 0) {
+            var fs = new Folder(RB.root + "/results").getFiles("*.json");
+            if (fs.length > 100) {
+                fs.sort(function (x, y) { return x.modified.getTime() - y.modified.getTime(); });
+                for (var i = 0; i < fs.length - 100; i++) try { fs[i].remove(); } catch (e1) {}
+            }
+        }
+    } catch (e) {}
+};
+RB.keptCount = 0;
+
 RB.tick = function () {
     if (!RB.busy && (RB.updTicks++ % 20) === 0) { try { RB.checkUpdateNote(); } catch (eu) {} }
+    if (!RB.busy && (RB.statusTicks++ % 7) === 0) RB.writeStatus();
     if (RB.busy || !RB.ui || !RB.ui.listen.value) return;
     var f = new File(RB.cmdPath);
     if (!f.exists) return;
@@ -93,18 +124,26 @@ RB.tick = function () {
         }
         RB.log("> " + cmd.command + " " + shorten(jsonStr(cmd.args || {}), 140));
         RB.setStatus("Running: " + cmd.command);
+        RB.busyCmd = { id: cmd.id, command: cmd.command }; RB.busySince = new Date().getTime(); RB.writeStatus();
+        var rev0 = projRevision();
         res.result = RB.run(cmd.command, cmd.args || {});
         res.ok = true;
+        var rev1 = projRevision();
+        if (rev0 !== null) res.revision = (rev1 === rev0) ? rev0 : [rev0, rev1]; // a write that did not change the number changed nothing
         RB.log("  ok (" + (new Date().getTime() - t0) + " ms)");
     } catch (e) {
         res.error = errStr(e);
         RB.log("! " + res.error);
+        // full arguments of the failing command, for bug reports (the "> " line above is shortened)
+        try { if (cmd) RB.log("  args: " + shorten(jsonStr(cmd.args || {}), 4000)); } catch (ea) {}
     }
     res.ms = new Date().getTime() - t0;
     res.finished = stamp();
     if (RB.warnings.length) res.warnings = RB.warnings;
     try { writeAtomic(RB.resPath, jsonStr(res, " ")); }
     catch (e2) { RB.log("! cannot write result: " + errStr(e2)); }
+    RB.keepResult(res);
+    RB.busyCmd = null; RB.busySince = null; RB.writeStatus();
     RB.setStatus();
     RB.busy = false;
 };
@@ -198,7 +237,8 @@ function buildUI(thisObj) {
 // ---------------------------------------------------------------- start
 ensureFolder(RB.root);
 buildUI(thisObj);
-RB.log("Started. Bridge folder: " + RB.root + "  (" + keysOf(RB.cmds).length + " commands)");
+RB.log("Started BridgeLine " + RB.VERSION + " | AE " + app.version + " (" + app.isoLanguage + ") | " + $.os +
+       " | " + keysOf(RB.cmds).length + " commands | bridge folder " + RB.root);
 $.global.__bridgeLineTick = function () { try { RB.tick(); } catch (e) { RB.busy = false; } };
 try { if ($.global.__bridgeLineTask) app.cancelTask($.global.__bridgeLineTask); } catch (e) {}
 $.global.__bridgeLineTask = app.scheduleTask("__bridgeLineTick()", 300, true);

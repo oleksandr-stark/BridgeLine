@@ -5,7 +5,7 @@ root = os.path.join(os.path.dirname(__file__), "..")
 rx = re.compile(r'^def\("([A-Za-z0-9]+)", \{([^}]*)\}, "((?:[^"\\]|\\.)*)"', re.M)
 sections = {"00": "Core", "10": "Read (no changes)", "20": "Layers", "30": "Properties, keyframes, expressions",
             "40": "Effects, masks, text, shapes", "50": "Comps, project, markers, retime, layout, 3D, render, menu, batch"}
-out = ["# BridgeLine - commands", "", "Generated from `src/*.jsx` by `tools/gen_commands_doc.py`. W = changes the project (needs 'Allow changes').", ""]
+out = ["# BridgeLine - commands", "", "Generated from `src/*.jsx` by `tools/gen_commands_doc.py`. W = changes the project (needs 'Allow changes'). W! = changes something Edit > Undo cannot take back (saves, renders, menu commands, cleanup): ask the user first.", ""]
 total = 0
 for f in sorted(glob.glob(os.path.join(root, "src", "*.jsx"))):
     cmds = rx.findall(open(f, encoding="utf-8").read())
@@ -13,7 +13,8 @@ for f in sorted(glob.glob(os.path.join(root, "src", "*.jsx"))):
         continue
     out += ["## " + sections.get(os.path.basename(f)[:2], os.path.basename(f)), "", "| Command | W | Description / args |", "|---|---|---|"]
     for name, flags, doc in cmds:
-        out.append("| `%s` | %s | %s |" % (name, "W" if "w" in flags else "", doc.replace("|", "\\|").replace('\\"', '"')))
+        mark = ("W!" if ("noUndo" in flags or "irreversible" in flags) else "W") if "w" in flags else ""
+        out.append("| `%s` | %s | %s |" % (name, mark, doc.replace("|", "\\|").replace('\\"', '"')))
         total += 1
     out.append("")
 out.insert(3, "Total: %d commands." % total)

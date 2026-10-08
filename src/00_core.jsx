@@ -10,7 +10,7 @@
 */
 (function (thisObj) {
 
-var RB = { VERSION: "1.0.4", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
+var RB = { VERSION: "1.0.5", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
 RB.root = Folder.myDocuments.fsName + "/bridgeline";
 RB.cmdPath = RB.root + "/command.json";
 RB.resPath = RB.root + "/result.json";
@@ -700,6 +700,51 @@ function textDocOut(d) {
     try { o.justification = enumName("ParagraphJustification", d.justification); } catch (e) {}
     return o;
 }
+// ---------------------------------------------------------------- fonts
+// "Montserrat-Bold" (PostScript), "Montserrat Bold" or "Montserrat" -> PostScript name; unknown -> error with similar families.
+// Needs the fonts API (AE 24+); on older versions the name is passed through unchanged.
+function resolveFont(name) {
+    var n = String(name), F = null;
+    try { F = app.fonts; if (!F || !F.getFontsByPostScriptName) return n; } catch (e) { return n; }
+    try { if (F.getFontsByPostScriptName(n).length) return n; } catch (e1) { return n; }
+    var parts = n.split(" "), i, list;
+    for (i = parts.length - 1; i >= 1; i--) {
+        try {
+            list = F.getFontsByFamilyNameAndStyleName(parts.slice(0, i).join(" "), parts.slice(i).join(" "));
+            if (list && list.length) return list[0].postScriptName;
+        } catch (e2) {}
+    }
+    var fams = [], lk = n.toLowerCase(), first = lk.split(/[\s\-]/)[0], all = F.allFonts, fam, f;
+    for (i = 0; i < all.length; i++) {
+        fam = all[i];
+        if (!fam.length) continue;
+        if (fam[0].familyName.toLowerCase() === lk) {   // family only: Regular, else the first style
+            for (f = 0; f < fam.length; f++) if (/^(regular|normal|roman|book)$/i.test(fam[f].styleName)) return fam[f].postScriptName;
+            return fam[0].postScriptName;
+        }
+        if (first.length > 2 && fam[0].familyName.toLowerCase().indexOf(first) >= 0 && fams.length < 8) {
+            var st = []; for (f = 0; f < fam.length && f < 6; f++) st.push(fam[f].styleName);
+            fams.push(fam[0].familyName + " (" + st.join(", ") + ")");
+        }
+    }
+    fail("Font not found: '" + n + "'. Use a PostScript name, 'Family Style' or 'Family'." + (fams.length ? " Similar: " + fams.join("; ") : ""));
+}
+// characters of text the font has no glyphs for ([] if all are there or the check is not available: AE 25.1+)
+function missingGlyphs(psName, text) {
+    var miss = [], seen = {};
+    try {
+        var fl = app.fonts.getFontsByPostScriptName(psName);
+        if (!fl || !fl.length || !fl[0].hasGlyphsFor) return miss;
+        var fo = fl[0], t = String(text);
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i);
+            if (seen[ch] || /\s/.test(ch)) continue;
+            seen[ch] = 1;
+            if (!fo.hasGlyphsFor(ch)) miss.push(ch);
+        }
+    } catch (e) {}
+    return miss;
+}
 function styleApply(target, o, isRange) {
     if (o.leading !== undefined && o.autoLeading === undefined && !isRange) o.autoLeading = false;
     for (var i = 0; i < TD_WRITE.length; i++) {
@@ -713,6 +758,7 @@ function styleApply(target, o, isRange) {
             if (k === "strokeColor" && o.applyStroke === undefined) target.applyStroke = true;
         }
         if (k === "text" && isArr(v)) v = v.join("\r");
+        if (k === "font") v = resolveFont(v);
         if (k === "allCaps" || k === "smallCaps") {
             try { target.fontCapsOption = v ? (k === "allCaps" ? FontCapsOption.FONT_ALL_CAPS : FontCapsOption.FONT_SMALL_CAPS) : FontCapsOption.FONT_NORMAL_CAPS; continue; } catch (e0) {}
         }
@@ -749,6 +795,14 @@ function valIn(p, v, atTime) {
     if (T === PropertyValueType.CUSTOM_VALUE) fail("Custom-value properties (curves, gradient colors...) cannot be set by script: " + propPath(p));
     if (T === PropertyValueType.COLOR) return colorIn(v);
     if (T === PropertyValueType.LAYER_INDEX && typeof v === "string") return getLayer(propLayer(p).containingComp, v).index;
+    if (T === PropertyValueType.OneD && typeof v === "string" && isNaN(Number(v))) {
+        // a popup / dropdown item by its label (AE 26+)
+        var opts = null;
+        try { opts = p.propertyParameters; } catch (e) {}
+        if (!opts || !opts.length) fail("'" + v + "' is not a number, and " + propPath(p) + " has no menu labels (needs AE 26+ and a popup property)");
+        for (var oi = 0; oi < opts.length; oi++) if (String(opts[oi]).toLowerCase() === v.toLowerCase()) return oi + 1;
+        fail("No item '" + v + "' in " + propPath(p) + ". Items: " + opts.join(", "));
+    }
     if (T === PropertyValueType.OneD || T === PropertyValueType.LAYER_INDEX || T === PropertyValueType.MASK_INDEX) {
         if (isArr(v)) v = v[0];
         if (typeof v === "boolean") v = v ? 1 : 0;
@@ -842,10 +896,18 @@ function remapKeys(p, fn) {
         caps.push(c);
     }
     if (!moved) return 0;
+    var hit = keyCollisions(caps);
+    if (hit) fail("Keys would land on the same time in " + propPath(p) + " (" + hit + "). Nothing was changed.");
     for (k = n; k >= 1; k--) p.removeKey(k);
     for (i = 0; i < caps.length; i++) keyRestore(p, caps[i], caps[i].nt);
     if (p.numKeys < caps.length) warn("Some keys collided on the same time in " + propPath(p));
     return moved;
+}
+// "t1 and t2 -> t" for the first pair of captured keys whose new times (nt) coincide, or null
+function keyCollisions(caps) {
+    var s = caps.slice(0).sort(function (x, y) { return x.nt - y.nt; });
+    for (var i = 1; i < s.length; i++) if (Math.abs(s[i].nt - s[i - 1].nt) < 1e-4) return rnd(s[i - 1].t) + " s and " + rnd(s[i].t) + " s -> " + rnd(s[i].nt) + " s";
+    return null;
 }
 function easeArray(p, k, spec, side) {
     var cur = side === "in" ? p.keyInTemporalEase(k) : p.keyOutTemporalEase(k), r = [];
@@ -980,6 +1042,8 @@ function dumpProp(p, o, depth) {
             if (p.numKeys > 0) r.k = keysOut(p, o.ease);
             else r.v = valOut(p, p.value);
         } catch (e) { r.err = errStr(e); }
+        // popup / dropdown menus (AE 26+): the label of the current item and all options
+        try { if (p.propertyParameters && p.propertyParameters.length) { r.label = p.valueText; r.options = p.propertyParameters; } } catch (e) {}
         if (hasX) {
             r.x = o.maxExpr ? shorten(p.expression, o.maxExpr) : p.expression;
             if (!p.expressionEnabled) r.xOff = true;
@@ -1166,23 +1230,75 @@ function parseTime(s, fps) {
 
 // ---------------------------------------------------------------- registry & dispatch
 // flags: {w: write command, noUndo: do not wrap in undo group}
-function def(name, flags, doc, fn) { RB.cmds[name] = { w: !!flags.w, noUndo: !!flags.noUndo, doc: doc, fn: fn }; }
+function def(name, flags, doc, fn) { RB.cmds[name] = { w: !!flags.w, noUndo: !!flags.noUndo, irreversible: !!flags.irreversible, doc: doc, fn: fn }; }
 RB.allowWrites = function () { return !!(RB.ui && RB.ui.allow && RB.ui.allow.value); };
+// app.project.revision grows with every change to the project; null if this AE has no such property
+function projRevision() { try { var r = app.project.revision; return (r === undefined || r === null) ? null : r; } catch (e) { return null; } }
+// ---------------------------------------------------------------- argument check ("did you mean")
+function editDistance(x, y) {
+    var m = x.length, n = y.length, d = [], i, j;
+    for (i = 0; i <= m; i++) { d[i] = [i]; }
+    for (j = 0; j <= n; j++) d[0][j] = j;
+    for (i = 1; i <= m; i++) for (j = 1; j <= n; j++)
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (x.charAt(i - 1) === y.charAt(j - 1) ? 0 : 1));
+    return d[m][n];
+}
+function closest(word, list) {
+    var best = null, bd = 99, lw = String(word).toLowerCase();
+    for (var i = 0; i < list.length; i++) {
+        var dd = editDistance(lw, String(list[i]).toLowerCase());
+        if (dd < bd) { bd = dd; best = list[i]; }
+    }
+    return (best !== null && bd <= Math.max(2, Math.floor(lw.length / 3))) ? best : null;
+}
+// unknown argument keys are ignored by the commands; say so instead of failing silently (RB.ARGS is generated)
+function checkArgs(command, args) {
+    var known = RB.ARGS ? RB.ARGS[command] : null, n = 0;
+    if (!known || !args) return 0;
+    var padded = " " + known + " ";
+    if (padded.indexOf(" * ") >= 0) return 0;
+    var list = known.split(" ");
+    for (var key in args) {
+        if (!has(args, key)) continue;
+        if (padded.indexOf(" " + key + " ") >= 0) continue;
+        var near = closest(key, list);
+        warn("Unknown argument '" + key + "' for " + command + " was ignored." + (near ? " Did you mean '" + near + "'?" : " Known: " + list.join(", ").replace("_retried, ", "")));
+        n++;
+    }
+    return n;
+}
+RB.suppressDepth = 0;
 RB.run = function (command, args, inBatch) {
     var c = RB.cmds[command];
-    if (!c) fail("Unknown command: " + command + " (use 'help')");
+    if (!c) { var near = closest(command, keysOf(RB.cmds)); fail("Unknown command: " + command + (near ? ". Did you mean '" + near + "'?" : "") + " (use 'help')"); }
+    checkArgs(command, args);
     if (c.w && !RB.allowWrites()) fail("'" + command + "' changes the project, but 'Allow changes' is off in the BridgeLine panel");
-    if (!c.w || c.noUndo || inBatch) return c.fn(args || {});
-    app.beginUndoGroup("BridgeLine: " + command);
-    try { return c.fn(args || {}); } finally { app.endUndoGroup(); }
+    // A modal alert from an effect, import or render would block AE (and the panel) until someone clicks.
+    // Menu commands are left alone: some of them are meant to show their dialog.
+    var suppress = command !== "menuCommand" && RB.suppressDepth === 0;
+    if (suppress) { try { app.beginSuppressDialogs(); RB.suppressDepth++; } catch (es) { suppress = false; } }
+    try {
+        if (!c.w || c.noUndo || inBatch) return c.fn(args || {});
+        app.beginUndoGroup("BridgeLine: " + command);
+        try { return c.fn(args || {}); } finally { app.endUndoGroup(); }
+    } finally {
+        if (suppress) { RB.suppressDepth--; try { app.endSuppressDialogs(false); } catch (ee) {} }
+    }
 };
+RB.LOG_MAX = 1000000; // bytes; log.txt is moved to log.1.txt (one old file kept)
 RB.log = function (s) {
     var line = stamp().substr(11) + "  " + s;
     RB.logLines.push(line);
     if (RB.logLines.length > 500) RB.logLines.shift();
     try {
         var f = new File(RB.root + "/log.txt");
-        f.encoding = "UTF-8";
+        if (f.exists && f.length > RB.LOG_MAX) {
+            var old = new File(RB.root + "/log.1.txt");
+            if (old.exists) old.remove();
+            f.rename("log.1.txt");
+            f = new File(RB.root + "/log.txt");
+        }
+        f.encoding = "UTF-8"; f.lineFeed = "Unix";
         if (f.open("a")) { f.writeln(stamp().substr(0, 10) + " " + line); f.close(); }
     } catch (e) {}
     if (RB.ui && RB.ui.list) {
