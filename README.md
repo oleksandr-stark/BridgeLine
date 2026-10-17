@@ -5,6 +5,10 @@ A ScriptUI panel for Adobe After Effects that lets an AI coding agent work with 
 - render single frames to PNG to see what it did;
 - make precise, undoable changes.
 
+A plain chat with no access to your computer (claude.ai or ChatGPT in the browser, a Claude Desktop chat without the
+BridgeLine MCP server) cannot drive After Effects: it can only write a script for you to run by hand. Use an agent that runs
+terminal commands (Claude Code, including the Code tab of Claude Desktop) or an MCP client with `bridgeline_mcp.py`.
+
 The panel exposes 151 fixed commands and has no `eval`. It cannot run arbitrary code, launch shell commands or open network connections. It is not tied to any template or project.
 
 Version 1.0.5. Tested on After Effects 2026 (26.5) and 27.0 Beta on macOS: 52/52 test scenarios pass on both.

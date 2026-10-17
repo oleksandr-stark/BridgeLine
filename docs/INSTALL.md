@@ -144,6 +144,10 @@ through MCP use `bridgeline_mcp.py` instead (Python 3 only, no packages to insta
                                  "env": {"AEB_PROJECT": "/path/to/Your Project.aep"}}}}
   ```
   On Windows use `"command": "python"` and a Windows path. `AEB_PROJECT` is optional (the tools take a `project` argument).
+- **After adding the server, quit the app completely and start a new chat.** A chat opened before that does not get the
+  tools, and Claude then offers to write a script instead of using the panel. On Windows also quit Claude Desktop from the
+  tray icon. Check that `bridgeline` is on in the chat's tools menu (the "+" button under the input box), then ask the
+  agent to run `ping` with your project path. Agents that install BridgeLine for the user: tell them this step.
 
 Tools: `bridgeline_command` (any panel command), `bridgeline_help`, `bridgeline_frames` (frames come back as images),
 `bridgeline_review` (contact sheet), `bridgeline_pixdiff`, `bridgeline_status`, `bridgeline_doctor`, `bridgeline_report`,
