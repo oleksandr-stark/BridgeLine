@@ -350,7 +350,7 @@ def("textLayout", {}, "How text composes: lines, overflow, wrapping, font covera
         }
         var miss = missingGlyphs(d.font, d.text);
         if (miss.length) o.missingGlyphs = miss.join("");
-        try { o.bounds = compBounds(l, a.time !== undefined ? parseTime(a.time, c.frameRate) : c.time); } catch (e) {}
+        try { o.bounds = compBounds(l, a.time !== undefined ? parseTime(a.time, c.frameRate) : c.time); hugeRect(c, o.bounds.width, o.bounds.height, "'" + l.name + "' bounds"); } catch (e) {}
         out.push(o);
     }
     var bad = [];
@@ -364,6 +364,7 @@ def("fitBox", { w: 1 }, "A plate (shape rectangle) behind a text layer that fits
     var pad = isArr(a.padding) ? a.padding : [num(a.padding, 20), num(a.padding, 20)];
     var t = a.time !== undefined ? parseTime(a.time, c.frameRate) : Math.max(l.inPoint, Math.min(c.time, l.outPoint - c.frameDuration));
     var r = l.sourceRectAtTime(t, false), w = r.width + 2 * pad[0], h = r.height + 2 * pad[1];
+    hugeRect(c, r.width, r.height, "Text '" + l.name + "'");
     var sl = c.layers.addShape();
     sl.name = a.name || (l.name + " plate");
     sl.moveAfter(l);
@@ -387,6 +388,8 @@ def("fitBox", { w: 1 }, "A plate (shape rectangle) behind a text layer that fits
     var tr = sl.property("ADBE Transform Group");
     tr.property("ADBE Anchor Point").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
     tr.property("ADBE Position").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
+    tr.property("ADBE Scale").setValue(l.threeDLayer ? [100, 100, 100] : [100, 100]);   // the jump compensated the text's scale
+    try { tr.property("ADBE Rotate Z").setValue(0); } catch (e) {}
     var rigged = a.rigged !== false, err = null;
     if (rigged) {
         var ref = 'thisComp.layer("' + l.name.replace(/"/g, '\\"') + '")';

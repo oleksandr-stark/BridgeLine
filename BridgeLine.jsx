@@ -10,7 +10,7 @@
 */
 (function (thisObj) {
 
-var RB = { VERSION: "1.0.5", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
+var RB = { VERSION: "1.0.6", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
 RB.root = Folder.myDocuments.fsName + "/bridgeline";
 RB.cmdPath = RB.root + "/command.json";
 RB.resPath = RB.root + "/result.json";
@@ -38,6 +38,12 @@ function rnd(v) {
 }
 function fail(msg) { throw new Error(msg); }
 function warn(msg) { RB.warnings.push(String(msg)); }
+// a measured rect far larger than the comp usually means a wrong scale somewhere (e.g. character scale 100 = 100x)
+function hugeRect(c, w, h, what) {
+    if (w > c.width * 10 || h > c.height * 10)
+        warn(what + " is " + Math.round(w) + "x" + Math.round(h) + ", over 10x the comp (" + c.width + "x" + c.height +
+            "): check the layer and character scale (dumpLayer) before using this size");
+}
 function toRegex(s, flags) {
     if (s instanceof RegExp) return s;
     return new RegExp(String(s), flags === undefined ? "i" : flags);
@@ -694,7 +700,10 @@ function textDocOut(d) {
     for (var i = 0; i < TD_READ.length; i++) {
         try {
             var v = d[TD_READ[i]];
-            if (v !== undefined && typeof v !== "function") o[TD_READ[i]] = rnd(v);
+            if (v === undefined || typeof v === "function") continue;
+            // AE keeps the character scale as a factor (1 = 100%); we show percent, like the Character panel
+            if (TD_READ[i] === "horizontalScale" || TD_READ[i] === "verticalScale") v = v * 100;
+            o[TD_READ[i]] = rnd(v);
         } catch (e) {}
     }
     try { o.justification = enumName("ParagraphJustification", d.justification); } catch (e) {}
@@ -759,6 +768,7 @@ function styleApply(target, o, isRange) {
         }
         if (k === "text" && isArr(v)) v = v.join("\r");
         if (k === "font") v = resolveFont(v);
+        if (k === "horizontalScale" || k === "verticalScale") v = num(v, 100) / 100;   // percent in, factor in AE
         if (k === "allCaps" || k === "smallCaps") {
             try { target.fontCapsOption = v ? (k === "allCaps" ? FontCapsOption.FONT_ALL_CAPS : FontCapsOption.FONT_SMALL_CAPS) : FontCapsOption.FONT_NORMAL_CAPS; continue; } catch (e0) {}
         }
@@ -1321,7 +1331,7 @@ RB.ARGS = {
     addKeyframes: "_retried all clear comp keys layer layerType layers match path relativeTo selected",
     addLight: "_retried anchor blend center comment comp enabled expressions inPoint index keepTransform label lightType locked name opacity options outPoint parent position props rotation scale shy startTime stretch threeD",
     addMarker: "_retried chapter comment comp duration label layer markers time url",
-    addMask: "_retried all color comp ellipse expansion feather featherFalloff inverted layer layerType layers locked match mode motionBlur name opacity rect selected time vertices",
+    addMask: "_retried all closed color comp ellipse expansion feather featherFalloff inTangents inverted layer layerType layers locked match mode motionBlur name opacity outTangents rect selected time vertices",
     addNull: "_retried anchor blend comment comp duration enabled expressions inPoint index keepTransform label locked name opacity outPoint parent position props rotation scale shy startTime stretch threeD",
     addProperty: "_retried all comp expressions index layer layerType layers match matchName name parent selected values",
     addShape: "_retried absolute anchor blend comment comp enabled expressions inPoint index keepTransform label locked name opacity outPoint parent position props rotation scale shape shapes shy startTime stretch threeD",
@@ -1331,7 +1341,7 @@ RB.ARGS = {
     addText: "_retried anchor blend box comment comp enabled expressions inPoint index inheritCharacterPanel keepTransform label locked name opacity outPoint parent position props rotation scale shy startTime stretch style text threeD",
     addTextAnimator: "_retried comp layer name properties selector",
     addToEssentialGraphics: "_retried comp egComp layer names path paths templateName",
-    addToRenderQueue: "* _retried comp file length outputTemplate overwrite range renderTemplate workArea",
+    addToRenderQueue: "_retried comp file outputTemplate overwrite range renderTemplate workArea",
     align: "_retried all comp edge layer layerType layers match selected time to",
     applyPreset: "_retried all comp file layer layerType layers match selected",
     audioToKeyframes: "_retried all comp keep layer layerType layers match minGap selected silence",
@@ -1345,10 +1355,10 @@ RB.ARGS = {
     checkGlyphs: "_retried font text",
     checkTextOverlap: "_retried comp ignore maxCover time times",
     cleanupProject: "_retried action comps confirm",
-    clearRQ: "* _retried indexes length onlyDone",
+    clearRQ: "_retried indexes onlyDone",
     compInfo: "_retried comp out",
-    copyEffects: "* _retried all comp effects layer layerType layers length match selected toComp toLayer toLayers toMatch",
-    copyLayerToComp: "* _retried all comp layer layerType layers length match selected toComp",
+    copyEffects: "_retried comp effects layer toComp toLayer toLayers toMatch",
+    copyLayerToComp: "* _retried all comp layer layerType layers match selected toComp",
     createComp: "_retried bgColor duration folder frameRate height ifExists name pixelAspect width",
     createFolder: "_retried name",
     deleteItem: "_retried force item items",
@@ -1387,10 +1397,10 @@ RB.ARGS = {
     materialOptions: "_retried all comp layer layerType layers match selected values",
     menuCommand: "_retried all command comp confirm layer layerType layers match selected",
     motionBlurSettings: "_retried adaptiveLimit all comp enabled layer layerMotionBlur layerType layers match samplesPerFrame selected shutterAngle shutterPhase",
-    moveKeyframes: "* _retried all comp delta indexes layer layerType layers length match path paths range selected selectedKeys times",
+    moveKeyframes: "_retried all comp delta indexes layer layerType layers match path paths range selected selectedKeys times",
     moveLayer: "_retried all comp layer layerType layers match selected to",
     moveToFolder: "_retried create folder item items",
-    offsetValues: "* _retried all comp delta indexes layer layerType layers length match path range selected selectedKeys times",
+    offsetValues: "_retried all comp delta indexes layer layerType layers match path range selected selectedKeys times",
     openComp: "_retried comp time workArea",
     pin: "_retried all comp edge layer layerType layers margin match safe selected time",
     ping: "_retried",
@@ -1401,13 +1411,13 @@ RB.ARGS = {
     queueInAME: "_retried render",
     removeEffect: "_retried all comp effect layer layerType layers match selected",
     removeExpression: "_retried all comp layer layerType layers match path selected",
-    removeKeyframes: "* _retried all comp indexes keepValue layer layerType layers length match path paths range selected selectedKeys times",
+    removeKeyframes: "_retried all comp indexes keepValue layer layerType layers match path paths range selected selectedKeys times",
     removeMarker: "_retried all comp index layer match time",
     removeMask: "_retried all comp layer layerType layers mask match selected",
     removeProperty: "_retried all comp layer layerType layers match path selected",
     renameLayer: "_retried all comp find layer layerType layers match name replace selected",
     renameProperty: "_retried comp layer name path",
-    renderFrames: "_retried all comp folder isolate layer layerType layers markers match prefix range resolution selected step time times",
+    renderFrames: "_retried comp folder isolate markers prefix range resolution step time times",
     renderPreview: "_retried comp file half range workArea",
     renderer3D: "_retried comp renderer",
     reorderEffect: "_retried comp effect index layer",
@@ -1421,7 +1431,7 @@ RB.ARGS = {
     resizeComp: "_retried anchor comp height width",
     restoreBackup: "_retried confirm discardUnsaved file",
     retimeByMap: "_retried comp compMatch comps dryRun extendComp map markers remapKeys trimOut",
-    reverseKeyframes: "* _retried all comp indexes layer layerType layers length match path paths range selected selectedKeys times",
+    reverseKeyframes: "_retried all comp indexes layer layerType layers match path paths range selected selectedKeys times",
     saveProject: "_retried confirm",
     selectLayers: "_retried add all comp layer layerType layers match open selected",
     separateDimensions: "_retried all comp layer layerType layers match path selected separated",
@@ -1433,12 +1443,12 @@ RB.ARGS = {
     setExpression: "_retried all comp enabled expression layer layerType layers match path selected",
     setGradient: "_retried comp end highlightAngle highlightLength layer opacity path start type",
     setItem: "_retried comment item label name",
-    setKeyInterpolation: "* _retried all comp indexes layer layerType layers length match path paths range selected selectedKeys times",
-    setMarker: "* _retried all chapter comment comp duration index label layer length match newTime shift time url",
+    setKeyInterpolation: "_retried all comp ease easeIn easeOut indexes interp label layer layerType layers match path paths range roving selected selectedKeys spatial times",
+    setMarker: "_retried all chapter comment comp duration index label layer match newTime shift time url",
     setMask: "* _retried comp layer mask newName",
     setParent: "_retried all comp keepTransform layer layerType layers match parent selected",
     setPathKeys: "_retried clear comp file fps keys layer path timeBase",
-    setPathVertices: "_retried comp layer path time",
+    setPathVertices: "* _retried applyFill applyStroke autoLeading chapter closed comment comp duration id inTangents index justification label layer leading length name outTangents path protectedRegion replace resetCharStyle resetParagraphStyle time toLowerCase url vertices",
     setProperties: "_retried all comp items layer layerType layers match selected time values",
     setProperty: "_retried all comp layer layerType layers match path selected time value",
     setProxy: "_retried file item none sequence useProxy",
@@ -1462,7 +1472,7 @@ RB.ARGS = {
     trimToMarker: "_retried all comp inMarker layer layerMarkers layerType layers match outMarker selected useEnd",
     valueAtTime: "_retried comp layer path preExpression time times",
     whereUsed: "_retried item text",
-    zoomToRect: "_retried all comp ease fill layer layerType layers match name range rect selected target time"
+    zoomToRect: "_retried comp ease fill layers name range rect target time"
 };
 // ================================================================ READ-ONLY COMMANDS
 
@@ -1776,6 +1786,7 @@ def("sourceRect", {}, "Layer rect in layer space + approx comp-space bounds. arg
             var s = ls[i].sourceRectAtTime(t, !!a.extents);
             o.rect = { left: rnd(s.left), top: rnd(s.top), width: rnd(s.width), height: rnd(s.height) };
             o.compBounds = compBounds(ls[i], t);
+            hugeRect(c, s.width, s.height, "'" + ls[i].name + "' rect");
         } catch (e) { o.error = errStr(e); }
         r.push(o);
     }
@@ -3316,7 +3327,7 @@ def("textLayout", {}, "How text composes: lines, overflow, wrapping, font covera
         }
         var miss = missingGlyphs(d.font, d.text);
         if (miss.length) o.missingGlyphs = miss.join("");
-        try { o.bounds = compBounds(l, a.time !== undefined ? parseTime(a.time, c.frameRate) : c.time); } catch (e) {}
+        try { o.bounds = compBounds(l, a.time !== undefined ? parseTime(a.time, c.frameRate) : c.time); hugeRect(c, o.bounds.width, o.bounds.height, "'" + l.name + "' bounds"); } catch (e) {}
         out.push(o);
     }
     var bad = [];
@@ -3330,6 +3341,7 @@ def("fitBox", { w: 1 }, "A plate (shape rectangle) behind a text layer that fits
     var pad = isArr(a.padding) ? a.padding : [num(a.padding, 20), num(a.padding, 20)];
     var t = a.time !== undefined ? parseTime(a.time, c.frameRate) : Math.max(l.inPoint, Math.min(c.time, l.outPoint - c.frameDuration));
     var r = l.sourceRectAtTime(t, false), w = r.width + 2 * pad[0], h = r.height + 2 * pad[1];
+    hugeRect(c, r.width, r.height, "Text '" + l.name + "'");
     var sl = c.layers.addShape();
     sl.name = a.name || (l.name + " plate");
     sl.moveAfter(l);
@@ -3353,6 +3365,8 @@ def("fitBox", { w: 1 }, "A plate (shape rectangle) behind a text layer that fits
     var tr = sl.property("ADBE Transform Group");
     tr.property("ADBE Anchor Point").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
     tr.property("ADBE Position").setValue(l.threeDLayer ? [0, 0, 0] : [0, 0]);
+    tr.property("ADBE Scale").setValue(l.threeDLayer ? [100, 100, 100] : [100, 100]);   // the jump compensated the text's scale
+    try { tr.property("ADBE Rotate Z").setValue(0); } catch (e) {}
     var rigged = a.rigged !== false, err = null;
     if (rigged) {
         var ref = 'thisComp.layer("' + l.name.replace(/"/g, '\\"') + '")';

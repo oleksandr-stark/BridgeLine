@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────────────────────────┐
-│ BridgeLine v1.0.5                   │  version
+│ BridgeLine v1.0.6                   │  version
 │ Listening  |  read-only             │  status line
 │ BridgeLine v1.0.6 is available: ... │  update notice (only when there is one)
 │ [x] Listen   [ ] Allow changes      │

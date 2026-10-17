@@ -310,6 +310,7 @@ def("sourceRect", {}, "Layer rect in layer space + approx comp-space bounds. arg
             var s = ls[i].sourceRectAtTime(t, !!a.extents);
             o.rect = { left: rnd(s.left), top: rnd(s.top), width: rnd(s.width), height: rnd(s.height) };
             o.compBounds = compBounds(ls[i], t);
+            hugeRect(c, s.width, s.height, "'" + ls[i].name + "' rect");
         } catch (e) { o.error = errStr(e); }
         r.push(o);
     }

@@ -10,7 +10,7 @@
 */
 (function (thisObj) {
 
-var RB = { VERSION: "1.0.5", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
+var RB = { VERSION: "1.0.6", cmds: {}, logLines: [], warnings: [], busy: false, ui: null };
 RB.root = Folder.myDocuments.fsName + "/bridgeline";
 RB.cmdPath = RB.root + "/command.json";
 RB.resPath = RB.root + "/result.json";
@@ -38,6 +38,12 @@ function rnd(v) {
 }
 function fail(msg) { throw new Error(msg); }
 function warn(msg) { RB.warnings.push(String(msg)); }
+// a measured rect far larger than the comp usually means a wrong scale somewhere (e.g. character scale 100 = 100x)
+function hugeRect(c, w, h, what) {
+    if (w > c.width * 10 || h > c.height * 10)
+        warn(what + " is " + Math.round(w) + "x" + Math.round(h) + ", over 10x the comp (" + c.width + "x" + c.height +
+            "): check the layer and character scale (dumpLayer) before using this size");
+}
 function toRegex(s, flags) {
     if (s instanceof RegExp) return s;
     return new RegExp(String(s), flags === undefined ? "i" : flags);
@@ -694,7 +700,10 @@ function textDocOut(d) {
     for (var i = 0; i < TD_READ.length; i++) {
         try {
             var v = d[TD_READ[i]];
-            if (v !== undefined && typeof v !== "function") o[TD_READ[i]] = rnd(v);
+            if (v === undefined || typeof v === "function") continue;
+            // AE keeps the character scale as a factor (1 = 100%); we show percent, like the Character panel
+            if (TD_READ[i] === "horizontalScale" || TD_READ[i] === "verticalScale") v = v * 100;
+            o[TD_READ[i]] = rnd(v);
         } catch (e) {}
     }
     try { o.justification = enumName("ParagraphJustification", d.justification); } catch (e) {}
@@ -759,6 +768,7 @@ function styleApply(target, o, isRange) {
         }
         if (k === "text" && isArr(v)) v = v.join("\r");
         if (k === "font") v = resolveFont(v);
+        if (k === "horizontalScale" || k === "verticalScale") v = num(v, 100) / 100;   // percent in, factor in AE
         if (k === "allCaps" || k === "smallCaps") {
             try { target.fontCapsOption = v ? (k === "allCaps" ? FontCapsOption.FONT_ALL_CAPS : FontCapsOption.FONT_SMALL_CAPS) : FontCapsOption.FONT_NORMAL_CAPS; continue; } catch (e0) {}
         }

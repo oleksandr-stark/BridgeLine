@@ -529,6 +529,15 @@ def _():
     r("createComp", {"name": "T_Text", "ifExists": "clear"})
     r("addText", {"comp": "T_Text", "name": "T1", "text": "Alpha Beta Gamma", "style": {"font": "ArialMT", "fontSize": 80}})
     r("addText", {"comp": "T_Text", "name": "T2", "text": "Box Alpha", "box": [800, 300], "position": [960, 700]})
+    # character scale is percent (AE keeps a factor): 1.0.5 wrote 100 as a factor and made every new text 100x larger
+    d0 = r("dumpLayer", {"comp": "T_Text", "layer": "T1", "props": False})["text"]
+    check(d0["horizontalScale"] == 100 and d0["verticalScale"] == 100, d0)
+    w0 = r("sourceRect", {"comp": "T_Text", "layer": "T1", "time": 0})["layers"][0]["rect"]["width"]
+    check(200 < w0 < 1500, "80 px 'Alpha Beta Gamma' should be a few hundred px wide, got %s" % w0)
+    r("setTextStyle", {"comp": "T_Text", "layer": "T1", "style": {"horizontalScale": 150}})
+    w1 = r("sourceRect", {"comp": "T_Text", "layer": "T1", "time": 0})["layers"][0]["rect"]["width"]
+    check(r("dumpLayer", {"comp": "T_Text", "layer": "T1", "props": False})["text"]["horizontalScale"] == 150 and close(w1 / w0, 1.5, 0.05), (w0, w1))
+    r("setTextStyle", {"comp": "T_Text", "layer": "T1", "style": {"horizontalScale": 100}})
     r("setText", {"comp": "T_Text", "layer": "T1", "text": ["Alpha Beta", "Gamma Delta"]})
     r("setTextStyle", {"comp": "T_Text", "layers": ["T1", "T2"], "style": {"fontSize": 64, "fillColor": [255, 0, 0], "tracking": 50, "leading": 90, "justification": "right", "allCaps": True, "strokeColor": "#000000", "strokeWidth": 3}})
     d = r("dumpLayer", {"comp": "T_Text", "layer": "T1", "props": False})["text"]
@@ -982,7 +991,15 @@ def _():
     fb = r("fitBox", {"comp": c, "layer": "LABEL", "padding": [30, 15], "color": "#202020"})
     check(fb["parent"] == "LABEL" and fb["rigged"], fb)
     sr = r("sourceRect", {"comp": c, "layers": ["LABEL", "LABEL plate"], "time": 1})
-    print("      fitBox:", fb["size"], [x.get("compBounds") for x in sr["layers"]][:2])
+    tb, pb = sr["layers"][0]["compBounds"], sr["layers"][1]["compBounds"]
+    check(fb["size"][0] < 600 and close(pb["width"], tb["width"] + 60, 2) and close(pb["height"], tb["height"] + 30, 2), (fb, tb, pb))
+    # a scaled text: the plate lives in the text's space (the parenting jump must not leave a compensating scale)
+    r("addText", {"comp": c, "name": "LABEL50", "text": "Label", "position": [400, 900], "scale": [50, 50], "style": {"fontSize": 60}})
+    r("setProperty", {"comp": c, "layer": "LABEL50", "path": "Transform/Scale", "value": [50, 50]})
+    r("fitBox", {"comp": c, "layer": "LABEL50", "padding": 20})
+    sr = r("sourceRect", {"comp": c, "layers": ["LABEL50", "LABEL50 plate"], "time": 1})
+    tb, pb = sr["layers"][0]["compBounds"], sr["layers"][1]["compBounds"]
+    check(close(pb["width"], tb["width"] + 20, 2) and close(pb["left"], tb["left"] - 10, 2), ("scaled text plate", tb, pb))
     # textsheet round trip
     import subprocess, json as _j, csv
     sheet = os.path.join(aeb.ROOT, "t_sheet.csv")

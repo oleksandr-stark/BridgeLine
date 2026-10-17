@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.6
+- **Fix: `addText` made every new text 100 times larger** (1.0.5). Character scale (`horizontalScale`, `verticalScale`)
+  is now in percent everywhere, like the Character panel.
+- `fitBox`: the right plate size for a scaled text.
+- `sourceRect`, `textLayout`, `fitBox` warn when a size is over 10x the comp.
+- Fewer false "unknown argument" warnings.
+
 ## 1.0.5
 - **MCP server** `bridgeline_mcp.py` (stdio, no dependencies): BridgeLine in Claude Desktop, Cursor and other MCP clients.
   Tools for any panel command, help, frames and contact sheets returned as images, pixdiff, status, doctor, report and
