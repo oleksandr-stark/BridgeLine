@@ -128,7 +128,7 @@ def _():
 @test("reset test project")
 def _():
     items = r("projectTree", {"flat": True})["items"]
-    ids = [i["id"] for i in items if (i["type"] == "comp" and i["name"].startswith("T_")) or (i["type"] == "folder" and i["name"] in ("Dups", "Deep", "Imported"))]
+    ids = [i["id"] for i in items if (i["type"] == "comp" and i["name"].startswith("T_")) or (i["type"] == "folder" and i["name"] in ("Dups", "Deep", "Imported", "SFX"))]
     if ids:
         r("deleteItem", {"items": ids, "force": True})
     r("clearRQ", {})

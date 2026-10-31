@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.7
+- **Windows + MCP: fixed "Transport closed"** and garbled non-English names. The clients now talk UTF-8 on every system.
+- **The panel recovers if its checking stops** (seen on Windows after File > Project Settings): untick and tick Listen,
+  or just click the panel.
+- A silent panel gets an answer at once, with what to do, instead of a long wait.
+- MCP: commands wait up to 50 s by default (clients cut longer calls off); the server keeps a log for bug reports.
+
 ## 1.0.6
 - **Fix: `addText` made every new text 100 times larger** (1.0.5). Character scale (`horizontalScale`, `verticalScale`)
   is now in percent everywhere, like the Character panel.

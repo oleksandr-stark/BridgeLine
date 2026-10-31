@@ -73,7 +73,8 @@ On Windows:
 - **Timeouts:** a failed send has `retry_safe`. `true` = the panel never took the command, send it again. `false` = the panel took it
   and has not answered (still running, or a dialog in AE): never resend a change blindly - `python3 aeb.py status <id>` shows
   its result once it finishes; otherwise read the state first. `python3 aeb.py status` shows what each open panel is doing
-  (project, Listen, Allow changes, busy with which command for how long).
+  (project, Listen, Allow changes, busy with which command for how long). A panel that has been silent and idle for over
+  15 s is refused at once: ask the user to close any dialog in After Effects, or to untick and tick Listen in the panel.
 - **After every write**, verify the result by reading back. Compare ids and names of the neighbouring layers too.
   Never assume a new or copied layer is "layer 1"; find it by id.
 - **Complex changes** go in several steps: first create/copy → check → then configure by name/id.

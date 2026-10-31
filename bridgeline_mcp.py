@@ -6,9 +6,11 @@
 
 It uses the same file protocol as aeb.py (the panel in After Effects still does the work and still needs Listen and,
 for changes, Allow changes). Frames come back as images. Env: AEB_PROJECT (default project), AEB_ROOT (exchange folder),
-BRIDGELINE_MCP_ALL_TOOLS=1 (also one tool per panel command - many clients cope badly with 140+ tools).
+BRIDGELINE_MCP_ALL_TOOLS=1 (also one tool per panel command - many clients cope badly with 140+ tools),
+BRIDGELINE_MCP_TIMEOUT (seconds a command may take by default, 50: below the 60 s tool timeout of clients like Codex).
+The server logs its start, every tool call (time, result) and how it ended to <exchange folder>/mcp_log.txt.
 """
-import base64, json, os, shutil, subprocess, sys, tempfile, time
+import base64, json, os, shutil, subprocess, sys, tempfile, time, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -16,6 +18,20 @@ import aeb            # noqa: E402
 import aeb_support    # noqa: E402
 
 VERSION = aeb.repo_version() or "?"
+TIMEOUT = float(os.environ.get("BRIDGELINE_MCP_TIMEOUT") or 50)
+MCP_LOG = os.path.join(aeb.ROOT, "mcp_log.txt")
+
+
+def mlog(s):
+    """One line in mcp_log.txt (rotated at ~1 MB). Never raises: the log must not break the server."""
+    try:
+        os.makedirs(aeb.ROOT, exist_ok=True)
+        if os.path.exists(MCP_LOG) and os.path.getsize(MCP_LOG) > 1000000:
+            os.replace(MCP_LOG, MCP_LOG[:-4] + ".1.txt")
+        with open(MCP_LOG, "a", encoding="utf-8") as f:
+            f.write("%s  [%d] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), os.getpid(), s))
+    except Exception:
+        pass
 PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 MAX_TEXT = 60000
 
@@ -37,7 +53,7 @@ TOOLS = [
     {"name": "bridgeline_command", "description": "Run any BridgeLine panel command (see bridgeline_help / resource bridgeline://commands). "
      "Returns the panel's JSON result (warnings included). renderFrames results also return the frames as images.",
      "inputSchema": obj({"command": {"type": "string"}, "args": {"type": "object", "description": "Arguments of the command"},
-                         "project": PROJ, "timeout": {"type": "number", "description": "seconds, default 120"}}, ["command"])},
+                         "project": PROJ, "timeout": {"type": "number", "description": "seconds, default 50 (BRIDGELINE_MCP_TIMEOUT); a longer command keeps running in AE - read its result with bridgeline_status"}}, ["command"])},
     {"name": "bridgeline_help", "description": "List panel commands with their arguments. filter = regex on name/description.",
      "inputSchema": obj({"filter": {"type": "string"}, "project": PROJ})},
     {"name": "bridgeline_frames", "description": "Render comp frames and return them as images (complete PNGs, empty/identical frames flagged). "
@@ -102,7 +118,8 @@ def project_of(args):
     return args.get("project") or os.environ.get("AEB_PROJECT")
 
 
-def send(command, cargs, project, timeout=120):
+def send(command, cargs, project, timeout=None):
+    timeout = TIMEOUT if timeout is None else timeout
     res, code = aeb.send(command, cargs or {}, timeout, project)
     if command == "ping" and code == 0:
         aeb.check_updates(res)
@@ -125,7 +142,7 @@ def frames_content(res, max_w=960, limit=8):
 def call_tool(name, a):
     proj = project_of(a)
     if name == "bridgeline_command":
-        res, code = send(a["command"], a.get("args") or {}, proj, a.get("timeout", 120))
+        res, code = send(a["command"], a.get("args") or {}, proj, a.get("timeout"))
         content = [text(res)]
         if a["command"] == "renderFrames" and code == 0:
             content += frames_content(res)
@@ -139,7 +156,7 @@ def call_tool(name, a):
     if name == "bridgeline_frames":
         cargs = {k: a[k] for k in ("comp", "time", "times", "range", "step", "isolate") if k in a}
         cargs.setdefault("folder", "renders/mcp")
-        res, code = send("renderFrames", cargs, proj, 180)
+        res, code = send("renderFrames", cargs, proj)
         content = [text(res)]
         if code == 0:
             content += frames_content(res, a.get("maxWidth", 960))
@@ -223,8 +240,12 @@ def reply(id_, result=None, error=None):
         msg["error"] = error
     else:
         msg["result"] = result
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except Exception as e:
+        mlog("cannot write the reply to id %s: %s: %s" % (id_, type(e).__name__, e))
+        raise
 
 
 def handle(msg):
@@ -241,12 +262,16 @@ def handle(msg):
     elif method == "tools/list":
         reply(id_, {"tools": all_tools()})
     elif method == "tools/call":
+        t0, args = time.time(), params.get("arguments") or {}
+        what = params.get("name") + (" " + str(args.get("command")) if args.get("command") else "")
         try:
-            content, is_err = call_tool(params.get("name"), params.get("arguments") or {})
+            content, is_err = call_tool(params.get("name"), args)
+            mlog("%s: %s (%.1f s)" % (what, "error" if is_err else "ok", time.time() - t0))
             reply(id_, {"content": content, "isError": bool(is_err)})
         except KeyError as e:
             reply(id_, error={"code": -32602, "message": "unknown tool or missing argument: %s" % e})
         except Exception as e:
+            mlog("%s: exception (%.1f s)\n%s" % (what, time.time() - t0, traceback.format_exc()))
             reply(id_, {"content": [text("BridgeLine MCP error: %s: %s" % (type(e).__name__, e))], "isError": True})
     elif method == "prompts/list":
         reply(id_, {"prompts": [{"name": "bridgeline", "description": "How to work with After Effects through BridgeLine (AGENTS.md)"}]})
@@ -270,17 +295,36 @@ def handle(msg):
 
 
 def main():
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except ValueError:
-            reply(None, error={"code": -32700, "message": "parse error"})
-            continue
-        for m in (msg if isinstance(msg, list) else [msg]):
-            handle(m)
+    aeb.utf8_stdio(lf=True)
+    mlog("start: BridgeLine MCP %s, Python %s, %s" % (VERSION, sys.version.split()[0], sys.platform))
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                mlog("parse error: %r" % line[:200])
+                reply(None, error={"code": -32700, "message": "parse error"})
+                continue
+            for m in (msg if isinstance(msg, list) else [msg]):
+                if m.get("method") == "initialize":
+                    ci = (m.get("params") or {}).get("clientInfo") or {}
+                    mlog("client: %s %s" % (ci.get("name", "?"), ci.get("version", "")))
+                try:
+                    handle(m)
+                except (BrokenPipeError, OSError):
+                    raise
+                except Exception:
+                    # one bad message must not end the session (the client would only see "Transport closed")
+                    mlog("handling %s failed\n%s" % (m.get("method"), traceback.format_exc()))
+                    if m.get("id") is not None:
+                        reply(m.get("id"), error={"code": -32603, "message": "internal error, see mcp_log.txt"})
+        mlog("end: the client closed stdin")
+    except BaseException as e:
+        mlog("end: %s: %s\n%s" % (type(e).__name__, e, traceback.format_exc()))
+        raise
 
 
 if __name__ == "__main__":

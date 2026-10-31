@@ -27,6 +27,17 @@ import glob, json, os, re, subprocess, sys, time, uuid, argparse
 
 
 
+def utf8_stdio(lf=False):
+    """UTF-8 on stdin/stdout/stderr. On Windows a piped stdout uses the ANSI code page (cp1252/cp1251): a Cyrillic layer
+    name in a result raised UnicodeEncodeError (or went out as non-UTF-8) and Cyrillic arguments came in garbled.
+    lf=True also writes plain \\n line ends (JSON-RPC over stdio)."""
+    for s, kw in ((sys.stdin, {}), (sys.stdout, {"newline": "\n"} if lf else {}), (sys.stderr, {})):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace", **kw)
+        except Exception:
+            pass
+
+
 def documents_dir():
     """The user's Documents folder, as After Effects (Folder.myDocuments) sees it."""
     if os.name == "nt":
@@ -87,7 +98,7 @@ def explain_silence():
             if st.get("busy"):
                 parts.append("%s: busy with '%s' for %d s (long command, or a dialog is open)" % (who, st["busy"].get("command"), time.time() - st.get("busySince", 0) / 1000.0))
             else:
-                parts.append("%s: silent for %d s (After Effects closed, frozen, or a modal dialog is open)" % (who, st["age"]))
+                parts.append("%s: silent for %d s (After Effects closed, frozen, or a modal dialog is open; if no dialog is open, untick and tick Listen in the panel or reopen it)" % (who, st["age"]))
         elif not st.get("listen"):
             parts.append("%s: Listen is off" % who)
         else:
@@ -114,6 +125,11 @@ def send(command, args, timeout=120, project=None):
         if fresh and not any(st.get("project") and _same_path(st["project"], project) for st in recent) and not any(st.get("busy") for st in recent):
             opened = ", ".join("AE %s: %s" % (st.get("ae"), st.get("project") or "unsaved project") for st in fresh)
             return {"ok": False, "retry_safe": True, "error": "no listening After Effects has '%s' open (%s). Nothing was sent. Open the project, or pass the path of the open one." % (project, opened)}, 2
+        # every panel with this project open has been silent for a while and is not running a command: the command would
+        # only wait out the pickup window (and maybe an MCP client's tool timeout). Answer now.
+        mine = [st for st in recent if st.get("project") and _same_path(st["project"], project)]
+        if mine and not any(st["age"] <= 15 or st.get("busy") for st in mine):
+            return {"ok": False, "retry_safe": True, "error": "the BridgeLine panel with '%s' open has been silent for %d s and is not running a command. Nothing was sent. A dialog may be open in After Effects (close it), or AE is closed or frozen. If no dialog is open, untick and tick Listen in the panel (or reopen Window > BridgeLine.jsx), then send again." % (os.path.basename(project), min(st["age"] for st in mine))}, 2
     tmp = CMD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         msg = {"id": cid, "command": command, "args": args}
@@ -369,4 +385,5 @@ def main():
 
 
 if __name__ == "__main__":
+    utf8_stdio()
     main()

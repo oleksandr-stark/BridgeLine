@@ -148,6 +148,10 @@ through MCP use `bridgeline_mcp.py` instead (Python 3 only, no packages to insta
   tools, and Claude then offers to write a script instead of using the panel. On Windows also quit Claude Desktop from the
   tray icon. Check that `bridgeline` is on in the chat's tools menu (the "+" button under the input box), then ask the
   agent to run `ping` with your project path. Agents that install BridgeLine for the user: tell them this step.
+- A command waits up to 50 s by default (`BRIDGELINE_MCP_TIMEOUT` in `env` changes it): many clients (Codex: 60 s) cut a
+  slower tool call off. A longer command keeps running in After Effects; `bridgeline_status` reads its result.
+- The server logs its sessions to `mcp_log.txt` in the exchange folder (start, client, each tool call, how it ended);
+  `aeb.py report` includes the last lines. Look there when a client says "Transport closed".
 
 Tools: `bridgeline_command` (any panel command), `bridgeline_help`, `bridgeline_frames` (frames come back as images),
 `bridgeline_review` (contact sheet), `bridgeline_pixdiff`, `bridgeline_status`, `bridgeline_doctor`, `bridgeline_report`,

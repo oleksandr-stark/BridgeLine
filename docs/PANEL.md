@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────────────────────────┐
-│ BridgeLine v1.0.6                   │  version
+│ BridgeLine v1.0.7                   │  version
 │ Listening  |  read-only             │  status line
 │ BridgeLine v1.0.6 is available: ... │  update notice (only when there is one)
 │ [x] Listen   [ ] Allow changes      │
@@ -46,6 +46,10 @@ The setting is remembered between launches.
 
 Turn it off when you want to be sure the agent does nothing in After Effects, for example while you work on another project.
 The agent then gets a "not picked up" error and tells you.
+
+If the panel stops answering although Listen is on and no dialog is open (seen on Windows after File > Project Settings),
+untick and tick **Listen**: that restarts the checking. The panel also restarts it by itself when you click it or move
+the mouse over it, and writes "Polling restarted" in its log.
 
 ## Allow changes
 

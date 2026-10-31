@@ -303,6 +303,9 @@ def report(raw=False, lines=80, project=None):
     out += ["```", "", "## Recent errors (%d)" % len(errors), "", "```"]
     out += errors or ["(none in the log)"]
     out += ["```", "", "## Last %d log lines" % len(last), "", "```"] + last + ["```", ""]
+    mcp = _tail_lines(os.path.join(aeb.ROOT, "mcp_log.txt"), 40)
+    if mcp:   # bridgeline_mcp.py: start, client, tool calls, how the session ended ("Transport closed" on the client side)
+        out += ["## MCP server log (last %d lines)" % len(mcp), "", "```"] + mcp + ["```", ""]
     if res:
         out += ["## Last result.json", "", "```json", json.dumps(res, ensure_ascii=False, indent=1)[:4000], "```", ""]
     if raw:

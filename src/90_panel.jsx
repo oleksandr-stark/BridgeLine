@@ -195,9 +195,11 @@ function buildUI(thisObj) {
 
     RB.ui = { win: w, status: status, upd: upd, listen: listen, allow: allow, list: list };
 
-    listen.onClick = function () { saveSetting("listen", listen.value ? "1" : "0"); RB.setStatus(); };
-    allow.onClick = function () { RB.log(allow.value ? "Changes ALLOWED" : "Read-only"); RB.setStatus(); };
+    // Listen also restarts the polling loop: on Windows it was seen to stop after File > Project Settings
+    listen.onClick = function () { saveSetting("listen", listen.value ? "1" : "0"); RB.arm(RB.loopStale() ? "Polling restarted by Listen (silent for " + RB.silentSec() + " s)" : null); RB.setStatus(); };
+    allow.onClick = function () { RB.log(allow.value ? "Changes ALLOWED" : "Read-only"); RB.ensureLoop(); RB.setStatus(); };
     bSel.onClick = function () {
+        RB.ensureLoop();
         try {
             var st = RB.cmds.activeState.fn({});
             writeText(RB.root + "/selection.json", jsonStr(st, " "));
@@ -205,9 +207,11 @@ function buildUI(thisObj) {
         } catch (e) { RB.log("! " + errStr(e)); }
     };
     bUndo.onClick = function () {
+        RB.ensureLoop();
         try { app.executeCommand(16); RB.log("Undo"); } catch (e) { RB.log("! " + errStr(e)); }
     };
     bNote.onClick = function () {
+        RB.ensureLoop();
         var txt = trim(note.text);
         if (!txt) return;
         try {
@@ -228,19 +232,51 @@ function buildUI(thisObj) {
     bOpen.onClick = function () { new Folder(RB.root).execute(); };
 
     w.onResizing = w.onResize = function () { this.layout.resize(); };
+    // any sign of life from the user (focus, mouse over the panel) checks that polling still runs
+    try { w.onActivate = w.onShow = function () { RB.ensureLoop(); }; } catch (ea) {}
+    try { w.addEventListener("mouseover", function () { RB.ensureLoop(); }); } catch (em) {}
     RB.setStatus();
     if (w instanceof Window) { w.center(); w.show(); } else { w.layout.layout(true); w.layout.resize(); }
     RB.checkUpdateNote();
     return w;
 }
 
+// ---------------------------------------------------------------- polling loop
+// app.scheduleTask calls __bridgeLineTick by name every 300 ms. A user report (Windows, AE 26.5) showed the loop
+// stopping after File > Project Settings while the panel UI still worked, so the loop can be re-armed from the UI:
+// Listen, any button, focus or mouse over the panel. Errors inside a tick are logged (at most every 30 s).
+RB.lastTick = new Date().getTime(); RB.tickErrAt = 0; RB.taskId = null;
+RB.silentSec = function () { return Math.round((new Date().getTime() - RB.lastTick) / 1000); };
+RB.loopStale = function () {
+    var lost = false;
+    try { lost = typeof $.global.__bridgeLineTick !== "function"; } catch (e) { lost = true; }
+    return lost || new Date().getTime() - RB.lastTick > 3000;
+};
+RB.arm = function (why) {
+    $.global.__bridgeLineTick = function () {
+        RB.lastTick = new Date().getTime();
+        try { RB.tick(); }
+        catch (e) {
+            RB.busy = false;
+            if (RB.lastTick - RB.tickErrAt > 30000) { RB.tickErrAt = RB.lastTick; try { RB.log("! polling error: " + errStr(e)); } catch (e2) {} }
+        }
+        RB.lastTick = new Date().getTime();   // again: a long command ran inside this tick
+    };
+    try { if (RB.taskId !== null) app.cancelTask(RB.taskId); } catch (e3) {}
+    try { if ($.global.__bridgeLineTask && $.global.__bridgeLineTask !== RB.taskId) app.cancelTask($.global.__bridgeLineTask); } catch (e4) {}
+    RB.taskId = $.global.__bridgeLineTask = app.scheduleTask("__bridgeLineTick()", 300, true);
+    RB.lastTick = new Date().getTime();
+    if (why) { RB.log(why); RB.writeStatus(); }
+};
+RB.ensureLoop = function () {
+    if (!RB.busy && RB.loopStale()) { RB.arm("Polling restarted (silent for " + RB.silentSec() + " s)"); try { RB.setStatus(); } catch (e) {} }
+};
+
 // ---------------------------------------------------------------- start
 ensureFolder(RB.root);
 buildUI(thisObj);
 RB.log("Started BridgeLine " + RB.VERSION + " | AE " + app.version + " (" + app.isoLanguage + ") | " + $.os +
        " | " + keysOf(RB.cmds).length + " commands | bridge folder " + RB.root);
-$.global.__bridgeLineTick = function () { try { RB.tick(); } catch (e) { RB.busy = false; } };
-try { if ($.global.__bridgeLineTask) app.cancelTask($.global.__bridgeLineTask); } catch (e) {}
-$.global.__bridgeLineTask = app.scheduleTask("__bridgeLineTick()", 300, true);
+RB.arm(null);
 
 })(this);
